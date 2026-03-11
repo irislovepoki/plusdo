@@ -1,0 +1,14 @@
+{
+  "name": "plusdo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "mobile": "npm --prefix apps/mobile run start:ci",
+    "server": "npm --prefix apps/server run dev",
+    "dev": "concurrently \"npm run server\" \"npm run mobile\"",
+    "build:server": "npm --prefix apps/server run build"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
