@@ -24,7 +24,7 @@ import {
 import { GestureHandlerRootView, Swipeable } from "react-native-gesture-handler";
 
 type Tab = "inbox" | "list" | "today" | "plan" | "settings";
-type Category = "work" | "shopping" | "relationships" | "life";
+type Category = "work" | "shopping" | "relationships" | "life" | "travel";
 type CertaintyTier = "confirmed" | "direct" | "suggestion";
 type VoiceComposerTarget = "capture" | "ask";
 type VoiceInputTarget = "query" | "composer";
@@ -67,6 +67,8 @@ const palette = {
   panelRelationships: "#DDD6CB",
   panelLife: "#747758",
   panelLifeInk: "#ECE6DA",
+  panelTravel: "#8A8765",
+  panelTravelInk: "#F0EBD9",
   rowBgLight: "rgba(245, 241, 233, 0.9)",
   rowBgDark: "rgba(231, 224, 210, 0.22)",
   navBg: "rgba(222, 214, 200, 0.95)",
@@ -165,12 +167,21 @@ const clusterOrder: Array<{
   },
   {
     key: "life",
-    title: "生活 / 出行",
+    title: "生活",
     panelColor: palette.panelLife,
     inkColor: palette.panelLifeInk,
     mutedInkColor: "rgba(236,230,218,0.82)",
     rowColor: palette.rowBgDark,
     rowInkColor: palette.panelLifeInk,
+  },
+  {
+    key: "travel",
+    title: "旅行",
+    panelColor: palette.panelTravel,
+    inkColor: palette.panelTravelInk,
+    mutedInkColor: "rgba(240,235,217,0.84)",
+    rowColor: palette.rowBgDark,
+    rowInkColor: palette.panelTravelInk,
   },
 ];
 
@@ -219,7 +230,8 @@ function isTodoItem(value: unknown): value is TodoItem {
     (item.category === "work" ||
       item.category === "shopping" ||
       item.category === "relationships" ||
-      item.category === "life") &&
+      item.category === "life" ||
+      item.category === "travel") &&
     (item.certainty === "confirmed" ||
       item.certainty === "direct" ||
       item.certainty === "suggestion") &&
@@ -273,6 +285,8 @@ function categoryTitle(category: Category): string {
       return "关系";
     case "life":
       return "生活";
+    case "travel":
+      return "旅行";
   }
 }
 
@@ -290,6 +304,8 @@ function nextCategory(category: Category): Category {
     case "relationships":
       return "life";
     case "life":
+      return "travel";
+    case "travel":
       return "work";
   }
 }
@@ -318,6 +334,11 @@ function categoryChipAppearance(category: Category): {
       return {
         backgroundColor: palette.panelLife,
         textColor: palette.panelLifeInk,
+      };
+    case "travel":
+      return {
+        backgroundColor: palette.panelTravel,
+        textColor: palette.panelTravelInk,
       };
   }
 }
@@ -473,9 +494,15 @@ function normalizeCategory(rawCategory: string | undefined): Category {
     case "work":
     case "shopping":
     case "relationships":
-      return rawCategory;
-    case "travel":
     case "life":
+    case "travel":
+      return rawCategory;
+    case "trip":
+    case "traveling":
+      return "travel";
+    case "home":
+    case "living":
+      return "life";
     case "triage":
     default:
       return "life";
@@ -554,6 +581,28 @@ function inferLocalTasks(
     });
   }
 
+  if (
+    lowered.includes("旅行") ||
+    lowered.includes("旅游") ||
+    lowered.includes("出行") ||
+    lowered.includes("机票") ||
+    lowered.includes("航班") ||
+    lowered.includes("酒店") ||
+    lowered.includes("高铁")
+  ) {
+    tasks.push({
+      id: makeId("item"),
+      title: "处理旅行安排",
+      category: "travel",
+      certainty: "direct",
+      dueDateKey,
+      sourceCaptureId: captureId,
+      sourceSnippet: transcript,
+      reasoning: "从旅行和出行关键词中识别出的事项。",
+      createdAt: new Date(Date.parse(createdAt) + 4000).toISOString(),
+    });
+  }
+
   if (tasks.length === 0) {
     tasks.push({
       id: makeId("item"),
@@ -581,7 +630,7 @@ function MainScreen() {
   const [isRecording, setIsRecording] = useState(false);
   const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
   const [activeVoiceInputTarget, setActiveVoiceInputTarget] = useState<VoiceInputTarget | null>(null);
-  const [isVoiceComposerOpen, setIsVoiceComposerOpen] = useState(false);
+  const [isVoiceComposerOpen, setIsVoiceComposerOpen] = useState(true);
   const [voiceComposerTarget, setVoiceComposerTarget] =
     useState<VoiceComposerTarget>("capture");
   const [voiceDraft, setVoiceDraft] = useState("");
@@ -669,6 +718,7 @@ function MainScreen() {
       shopping: ordered.filter((it) => it.category === "shopping"),
       relationships: ordered.filter((it) => it.category === "relationships"),
       life: ordered.filter((it) => it.category === "life"),
+      travel: ordered.filter((it) => it.category === "travel"),
     };
   }, [items]);
 
@@ -1169,16 +1219,30 @@ function MainScreen() {
     void startNativeRecording("composer");
   };
 
+  const resetDockComposer = () => {
+    voiceDraftRef.current = "";
+    setVoiceDraft("");
+    setHasComposerTranscription(false);
+    setComposerCategoryChoice("list");
+    setIsComposerCategoryMenuOpen(false);
+    setSelectedDueDate(new Date());
+    setIsDueDatePickerOpen(false);
+    setVoiceComposerState("idle");
+    setVoiceHint(defaultVoiceHint("capture"));
+    setIsVoiceComposerOpen(true);
+  };
+
   const submitVoiceDraft = () => {
     const normalized = voiceDraft.trim();
     if (!normalized) return;
 
     const selectedCategory = composerCategoryChoice === "list" ? null : composerCategoryChoice;
-    setIsVoiceComposerOpen(false);
     setIsComposerCategoryMenuOpen(false);
+    setIsDueDatePickerOpen(false);
 
     if (!hasComposerTranscription) {
       createConfirmedItemFromInput(normalized, selectedCategory);
+      resetDockComposer();
       return;
     }
 
@@ -1187,6 +1251,7 @@ function MainScreen() {
       : `（计划日期：${selectedDueDate.toISOString().slice(0, 10)}）`;
     const payload = dueDateNote.length > 0 ? `${normalized} ${dueDateNote}` : normalized;
     void organizeTranscript(payload, selectedCategory);
+    resetDockComposer();
   };
 
   const startVoiceComposer = (target: VoiceComposerTarget = "capture") => {
@@ -1291,6 +1356,7 @@ function MainScreen() {
             key={cluster.key}
             style={[
               styles.gridCard,
+              cluster.key === "travel" ? styles.gridCardWide : null,
               { backgroundColor: cluster.panelColor, borderColor: palette.border },
             ]}
           >
@@ -1433,7 +1499,7 @@ function MainScreen() {
                       </Pressable>
                       {isCategoryMenuOpen ? (
                         <View style={styles.categoryDropdownMenu}>
-                          {(["shopping", "work", "relationships", "life"] as Category[]).map((category) => {
+                          {(["shopping", "work", "relationships", "life", "travel"] as Category[]).map((category) => {
                             const appearance = categoryChipAppearance(category);
                             const active = item.category === category;
 
@@ -1531,10 +1597,9 @@ function MainScreen() {
     );
 
     return (
-      <View style={styles.simplePanel}>
-        <Text style={styles.title}>今天要做</Text>
+      <View style={styles.todayScreen}>
         {todayItems.length === 0 ? (
-          <Text style={styles.simpleItem}>今天还没有待办事项。</Text>
+          <Text style={styles.todayEmptyText}>今天还没有待办事项。</Text>
         ) : (
           <View style={styles.todayList}>
             {todayItems.map((it) => {
@@ -1613,13 +1678,27 @@ function MainScreen() {
   return (
     <SafeAreaView style={styles.screen} edges={["top", "bottom"]}>
       <StatusBar style="dark" />
+      <View style={styles.topNav}>
+        {(["inbox", "list", "today", "plan", "settings"] as Tab[]).map((tab) => (
+          <Pressable
+            key={tab}
+            onPress={() => setActiveTab(tab)}
+            style={[styles.navItem, activeTab === tab ? styles.navItemActive : null]}
+          >
+            <Text style={[styles.navText, activeTab === tab ? styles.navTextActive : null]}>
+              {tabLabel[tab]}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={[
           styles.scrollContent,
           {
-            paddingTop: 8,
-            paddingBottom: 220 + insets.bottom,
+            paddingTop: 10,
+            paddingBottom: 274 + insets.bottom,
           },
         ]}
         showsVerticalScrollIndicator={false}
@@ -1631,239 +1710,232 @@ function MainScreen() {
         {activeTab === "settings" && renderSettings()}
       </ScrollView>
 
-      {isVoiceComposerOpen ? (
-        <>
+      {(isDueDatePickerOpen || isComposerCategoryMenuOpen) ? (
+        <Pressable
+          style={styles.voiceComposerBackdrop}
+          onPress={() => {
+            setIsComposerCategoryMenuOpen(false);
+            setIsDueDatePickerOpen(false);
+          }}
+        />
+      ) : null}
+
+      <View style={[styles.voiceComposerDock, { bottom: 14 + insets.bottom }]}>
+        <View style={styles.voiceComposerTopRow}>
           <Pressable
-            style={styles.voiceComposerBackdrop}
+            hitSlop={8}
+            style={[
+              styles.voiceListPicker,
+              isComposerCategoryMenuOpen ? styles.voiceListPickerActive : null,
+            ]}
             onPress={() => {
-              setIsComposerCategoryMenuOpen(false);
-              setIsVoiceComposerOpen(false);
+              setIsComposerCategoryMenuOpen((current) => !current);
             }}
-          />
-          <View style={[styles.voiceComposer, { bottom: 102 + insets.bottom }]}>
+          >
+            <Text style={styles.voiceListPickerText}>{composerCategoryTitle(composerCategoryChoice)}</Text>
+            <MaterialCommunityIcons
+              name={isComposerCategoryMenuOpen ? "chevron-up" : "chevron-down"}
+              size={16}
+              color={palette.inkMuted}
+            />
+          </Pressable>
+          <Pressable
+            style={[
+              styles.voiceMetaChip,
+              styles.voiceMetaChipActive,
+            ]}
+            onPress={() => {
+              setCalendarMonth(startOfDay(selectedDueDate));
+              setIsDueDatePickerOpen((current) => !current);
+              setIsComposerCategoryMenuOpen(false);
+            }}
+          >
+            <Text style={styles.voiceMetaChipText}>{formatDueDateLabel(selectedDueDate)}</Text>
+          </Pressable>
+          <Pressable style={styles.voiceMetaChip}>
+            <Text style={styles.voiceMetaChipText}>附件</Text>
+          </Pressable>
+          <Pressable style={styles.voiceMetaChip}>
+            <Text style={styles.voiceMetaChipText}>优先级</Text>
+          </Pressable>
+          <Pressable style={styles.voiceMetaChip}>
+            <Text style={styles.voiceMetaChipText}>提醒</Text>
+          </Pressable>
+        </View>
+
+        {isDueDatePickerOpen ? (
+          <View style={styles.calendarPanel}>
+            <View style={styles.calendarHeader}>
+              <Pressable
+                style={styles.calendarNavButton}
+                onPress={() => {
+                  setCalendarMonth(
+                    (current) => new Date(current.getFullYear(), current.getMonth() - 1, 1),
+                  );
+                }}
+              >
+                <MaterialCommunityIcons name="chevron-left" size={20} color={palette.accent} />
+              </Pressable>
+              <Text style={styles.calendarHeaderText}>{formatMonthLabel(calendarMonth)}</Text>
+              <Pressable
+                style={styles.calendarNavButton}
+                onPress={() => {
+                  setCalendarMonth(
+                    (current) => new Date(current.getFullYear(), current.getMonth() + 1, 1),
+                  );
+                }}
+              >
+                <MaterialCommunityIcons name="chevron-right" size={20} color={palette.accent} />
+              </Pressable>
+            </View>
+
+            <View style={styles.calendarWeekRow}>
+              {calendarWeekdayLabels.map((label) => (
+                <Text key={label} style={styles.calendarWeekLabel}>
+                  {label}
+                </Text>
+              ))}
+            </View>
+
+            <View style={styles.calendarGrid}>
+              {calendarDays.map((dateOption, index) => {
+                if (!dateOption) {
+                  return <View key={`empty-${index}`} style={styles.calendarDayPlaceholder} />;
+                }
+
+                const active = isSameDay(dateOption, selectedDueDate);
+                const isToday = isSameDay(dateOption, new Date());
+
+                return (
+                  <Pressable
+                    key={dateOption.toISOString()}
+                    style={[styles.calendarDayButton, active ? styles.calendarDayButtonActive : null]}
+                    onPress={() => {
+                      setSelectedDueDate(dateOption);
+                      setCalendarMonth(new Date(dateOption.getFullYear(), dateOption.getMonth(), 1));
+                      setIsDueDatePickerOpen(false);
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.calendarDayText,
+                        isToday ? styles.calendarDayTextToday : null,
+                        active ? styles.calendarDayTextActive : null,
+                      ]}
+                    >
+                      {dateOption.getDate()}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
+
+        {(isComposerRecording || isComposerVoiceProcessing) ? (
+          <View style={styles.voiceStatusBanner}>
+            <MaterialCommunityIcons
+              name={isComposerRecording ? "record-circle-outline" : "timer-sand"}
+              size={14}
+              color={palette.accent}
+            />
+            <Text style={styles.voiceStatusText}>
+              {isComposerRecording ? "正在录音，点话筒停止" : "正在转录..."}
+            </Text>
+          </View>
+        ) : null}
+
+        <View style={styles.voiceInputRow}>
+          <View style={styles.voiceInputContainer}>
             <TextInput
               value={voiceDraft}
               onChangeText={(nextValue) => {
                 voiceDraftRef.current = nextValue;
                 setVoiceDraft(nextValue);
               }}
-              placeholder={voiceComposerPlaceholder("capture")}
+              placeholder={isComposerVoiceProcessing ? "正在转录..." : voiceComposerPlaceholder("capture")}
               placeholderTextColor={palette.inkSoft}
               multiline
+              editable={!isComposerVoiceProcessing}
               textAlignVertical="top"
               style={styles.voiceComposerInput}
             />
-
-          <View style={styles.voiceComposerActionRow}>
             <Pressable
               style={[
-                styles.voiceSubmitButton,
-                voiceDraft.trim().length === 0 || isAsking || isRecording || isVoiceProcessing
-                  ? styles.askButtonDisabled
+                styles.voiceInlineSendButton,
+                voiceDraft.trim().length > 0 && !isComposerRecording && !isComposerVoiceProcessing
+                  ? styles.voiceInlineSendButtonActive
                   : null,
               ]}
-              disabled={voiceDraft.trim().length === 0 || isAsking || isRecording || isVoiceProcessing}
+              disabled={voiceDraft.trim().length === 0 || isComposerRecording || isComposerVoiceProcessing}
               onPress={submitVoiceDraft}
             >
-              <Text style={styles.voiceSubmitButtonText}>{isAsking ? "…" : voiceComposerSubmitLabel("capture")}</Text>
+              <MaterialCommunityIcons
+                name="send"
+                size={16}
+                color={
+                  voiceDraft.trim().length > 0 && !isComposerRecording && !isComposerVoiceProcessing
+                    ? "#F3E7D8"
+                    : palette.inkSoft
+                }
+              />
             </Pressable>
           </View>
 
-          <View style={styles.voiceComposerMetaRow}>
-            <Pressable
-              style={[
-                styles.voiceMetaChip,
-                styles.voiceMetaChipActive,
-              ]}
-                onPress={() => {
-                  setCalendarMonth(startOfDay(selectedDueDate));
-                  setIsDueDatePickerOpen((current) => !current);
-                  setIsComposerCategoryMenuOpen(false);
-                }}
-              >
-              <Text style={styles.voiceMetaChipText}>{formatDueDateLabel(selectedDueDate)}</Text>
-            </Pressable>
-            <Pressable style={styles.voiceMetaChip}>
-              <Text style={styles.voiceMetaChipText}>附件</Text>
-            </Pressable>
-            <Pressable style={styles.voiceMetaChip}>
-              <Text style={styles.voiceMetaChipText}>优先级</Text>
-            </Pressable>
-            <Pressable style={styles.voiceMetaChip}>
-              <Text style={styles.voiceMetaChipText}>提醒</Text>
-            </Pressable>
-          </View>
-
-          {isDueDatePickerOpen ? (
-            <View style={styles.calendarPanel}>
-              <View style={styles.calendarHeader}>
-                <Pressable
-                  style={styles.calendarNavButton}
-                  onPress={() => {
-                    setCalendarMonth(
-                      (current) => new Date(current.getFullYear(), current.getMonth() - 1, 1),
-                    );
-                  }}
-                >
-                  <MaterialCommunityIcons name="chevron-left" size={20} color={palette.accent} />
-                </Pressable>
-                <Text style={styles.calendarHeaderText}>{formatMonthLabel(calendarMonth)}</Text>
-                <Pressable
-                  style={styles.calendarNavButton}
-                  onPress={() => {
-                    setCalendarMonth(
-                      (current) => new Date(current.getFullYear(), current.getMonth() + 1, 1),
-                    );
-                  }}
-                >
-                  <MaterialCommunityIcons name="chevron-right" size={20} color={palette.accent} />
-                </Pressable>
-              </View>
-
-              <View style={styles.calendarWeekRow}>
-                {calendarWeekdayLabels.map((label) => (
-                  <Text key={label} style={styles.calendarWeekLabel}>
-                    {label}
-                  </Text>
-                ))}
-              </View>
-
-              <View style={styles.calendarGrid}>
-                {calendarDays.map((dateOption, index) => {
-                  if (!dateOption) {
-                    return <View key={`empty-${index}`} style={styles.calendarDayPlaceholder} />;
-                  }
-
-                  const active = isSameDay(dateOption, selectedDueDate);
-                  const isToday = isSameDay(dateOption, new Date());
-
-                  return (
-                    <Pressable
-                      key={dateOption.toISOString()}
-                      style={[styles.calendarDayButton, active ? styles.calendarDayButtonActive : null]}
-                      onPress={() => {
-                        setSelectedDueDate(dateOption);
-                        setCalendarMonth(new Date(dateOption.getFullYear(), dateOption.getMonth(), 1));
-                        setIsDueDatePickerOpen(false);
-                      }}
-                    >
-                      <Text
-                        style={[
-                          styles.calendarDayText,
-                          isToday ? styles.calendarDayTextToday : null,
-                          active ? styles.calendarDayTextActive : null,
-                        ]}
-                      >
-                        {dateOption.getDate()}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            </View>
-          ) : null}
-
-            <View style={styles.voiceComposerBottomRow}>
-              <Pressable
-                hitSlop={8}
-                style={[
-                  styles.voiceListPicker,
-                  isComposerCategoryMenuOpen ? styles.voiceListPickerActive : null,
-                ]}
-                onPress={() => {
-                  setIsComposerCategoryMenuOpen((current) => !current);
-                }}
-              >
-                <Text style={styles.voiceListPickerText}>{composerCategoryTitle(composerCategoryChoice)}</Text>
-                <MaterialCommunityIcons
-                  name={isComposerCategoryMenuOpen ? "chevron-up" : "chevron-down"}
-                  size={16}
-                  color={palette.inkMuted}
-                />
-              </Pressable>
-              <View style={styles.voiceBottomActions}>
-                <Pressable
-                  style={[
-                    styles.voiceRecordButton,
-                    isComposerRecording ? styles.voiceRecordButtonActive : null,
-                    isComposerVoiceProcessing ? styles.askButtonDisabled : null,
-                  ]}
-                  disabled={isComposerVoiceProcessing}
-                  onPress={toggleComposerRecording}
-                >
-                  {isComposerRecording ? (
-                    <View style={styles.voiceStopSquare} />
-                  ) : (
-                    <Text style={styles.voiceRecordButtonText}>+</Text>
-                  )}
-                </Pressable>
-              </View>
-            </View>
-
-            {isComposerCategoryMenuOpen ? (
-              <View style={styles.voiceCategoryMenu}>
-                {(["list", "shopping", "work", "relationships", "life"] as ComposerCategoryChoice[]).map(
-                  (choice) => {
-                    const active = composerCategoryChoice === choice;
-                    const appearance = choice === "list" ? null : categoryChipAppearance(choice);
-
-                    return (
-                      <Pressable
-                        key={choice}
-                        style={[
-                          styles.voiceCategoryOption,
-                          active ? styles.voiceCategoryOptionActive : null,
-                        ]}
-                        onPress={() => {
-                          setComposerCategoryChoice(choice);
-                          setIsComposerCategoryMenuOpen(false);
-                        }}
-                      >
-                        <Text
-                          style={[
-                            styles.voiceCategoryOptionText,
-                            choice === "list"
-                              ? styles.voiceCategoryOptionTextList
-                              : { color: appearance?.textColor ?? palette.inkMuted },
-                          ]}
-                        >
-                          {composerCategoryTitle(choice)}
-                        </Text>
-                      </Pressable>
-                    );
-                  },
-                )}
-              </View>
-            ) : null}
-
-          </View>
-        </>
-      ) : (
-        <Pressable
-          style={[
-            styles.fab,
-            { bottom: 102 + insets.bottom },
-            isComposerRecording ? styles.fabRecording : null,
-          ]}
-          onPress={() => startVoiceComposer("capture")}
-        >
-          <Text style={styles.fabText}>+</Text>
-        </Pressable>
-      )}
-
-      <View style={[styles.bottomNav, { bottom: 14 + insets.bottom }]}>
-        {(["inbox", "list", "today", "plan", "settings"] as Tab[]).map((tab) => (
           <Pressable
-            key={tab}
-            onPress={() => setActiveTab(tab)}
-            style={styles.navItem}
+            style={[
+              styles.voiceRecordButton,
+              isComposerRecording ? styles.voiceRecordButtonActive : null,
+              isComposerVoiceProcessing ? styles.askButtonDisabled : null,
+            ]}
+            disabled={isComposerVoiceProcessing}
+            onPress={toggleComposerRecording}
           >
-            <Text style={[styles.navText, activeTab === tab ? styles.navTextActive : null]}>
-              {tabLabel[tab]}
-            </Text>
+            <MaterialCommunityIcons
+              name={isComposerRecording ? "stop" : "microphone-outline"}
+              size={isComposerRecording ? 20 : 24}
+              color="#F3E7D8"
+            />
           </Pressable>
-        ))}
+        </View>
+
+        {isComposerCategoryMenuOpen ? (
+          <View style={styles.voiceCategoryMenu}>
+            {(["list", "shopping", "work", "relationships", "life", "travel"] as ComposerCategoryChoice[]).map(
+              (choice) => {
+                const active = composerCategoryChoice === choice;
+                const appearance = choice === "list" ? null : categoryChipAppearance(choice);
+
+                return (
+                  <Pressable
+                    key={choice}
+                    style={[
+                      styles.voiceCategoryOption,
+                      active ? styles.voiceCategoryOptionActive : null,
+                    ]}
+                    onPress={() => {
+                      setComposerCategoryChoice(choice);
+                      setIsComposerCategoryMenuOpen(false);
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.voiceCategoryOptionText,
+                        choice === "list"
+                          ? styles.voiceCategoryOptionTextList
+                          : { color: appearance?.textColor ?? palette.inkMuted },
+                      ]}
+                    >
+                      {composerCategoryTitle(choice)}
+                    </Text>
+                  </Pressable>
+                );
+              },
+            )}
+          </View>
+        ) : null}
       </View>
+
     </SafeAreaView>
   );
 }
@@ -1960,6 +2032,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     padding: 14,
     gap: 3,
+  },
+  gridCardWide: {
+    width: "100%",
   },
   cardTitle: {
     fontSize: 28 / 1.5,
@@ -2272,6 +2347,18 @@ const styles = StyleSheet.create({
     borderColor: palette.border,
     elevation: 8,
   },
+  voiceComposerDock: {
+    position: "absolute",
+    left: 18,
+    right: 18,
+    zIndex: 12,
+    borderRadius: 28,
+    padding: 16,
+    gap: 12,
+    backgroundColor: "rgba(239, 231, 218, 0.98)",
+    borderWidth: 1,
+    borderColor: palette.border,
+  },
   voiceComposerBackdrop: {
     position: "absolute",
     top: 0,
@@ -2281,33 +2368,30 @@ const styles = StyleSheet.create({
     zIndex: 11,
   },
   voiceComposerInput: {
-    minHeight: 84,
+    flex: 1,
+    minHeight: 42,
+    maxHeight: 140,
     borderRadius: 0,
-    paddingHorizontal: 0,
-    paddingVertical: 0,
-    paddingRight: 42,
+    paddingHorizontal: 4,
+    paddingVertical: 6,
+    paddingRight: 0,
     backgroundColor: "transparent",
     borderWidth: 0,
     color: palette.ink,
-    fontSize: 24,
-    lineHeight: 32,
-    fontWeight: "700",
+    fontSize: 16,
+    lineHeight: 22,
+    fontWeight: "600",
   },
-  voiceComposerActionRow: {
+  voiceComposerTopRow: {
     flexDirection: "row",
-    justifyContent: "flex-end",
-    marginTop: -2,
-  },
-  voiceComposerMetaRow: {
-    flexDirection: "row",
-    gap: 8,
     alignItems: "center",
-    flexWrap: "wrap",
+    justifyContent: "flex-start",
+    gap: 6,
   },
   voiceMetaChip: {
-    height: 40,
-    borderRadius: 20,
-    paddingHorizontal: 14,
+    height: 32,
+    borderRadius: 16,
+    paddingHorizontal: 10,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
@@ -2319,7 +2403,7 @@ const styles = StyleSheet.create({
   },
   voiceMetaChipText: {
     color: palette.accent,
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: "700",
   },
   calendarPanel: {
@@ -2388,22 +2472,25 @@ const styles = StyleSheet.create({
   calendarDayTextActive: {
     color: "#F3E7D8",
   },
-  voiceComposerBottomRow: {
+  voiceStatusBanner: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-    borderTopWidth: 1,
-    borderTopColor: palette.border,
-    paddingTop: 10,
+    gap: 6,
+    paddingTop: 2,
+  },
+  voiceStatusText: {
+    color: palette.accent,
+    fontSize: 12,
+    fontWeight: "700",
   },
   voiceListPicker: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    minWidth: 86,
+    gap: 4,
+    minWidth: 62,
     borderRadius: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     backgroundColor: "rgba(245, 241, 233, 0.65)",
     borderWidth: 1,
     borderColor: palette.border,
@@ -2413,7 +2500,7 @@ const styles = StyleSheet.create({
   },
   voiceListPickerText: {
     color: palette.inkMuted,
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: "700",
   },
   voiceCategoryMenu: {
@@ -2442,15 +2529,39 @@ const styles = StyleSheet.create({
   voiceCategoryOptionTextList: {
     color: palette.inkMuted,
   },
-  voiceBottomActions: {
+  voiceInputRow: {
     flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 8,
+  },
+  voiceInputContainer: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "flex-end",
+    borderWidth: 1,
+    borderColor: palette.border,
+    borderRadius: 22,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "rgba(245, 241, 233, 0.48)",
+  },
+  voiceInlineSendButton: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     alignItems: "center",
-    gap: 10,
+    justifyContent: "center",
+    marginLeft: 4,
+    marginBottom: 2,
+    backgroundColor: "rgba(245, 241, 233, 0.8)",
+  },
+  voiceInlineSendButtonActive: {
+    backgroundColor: palette.accent,
   },
   voiceRecordButton: {
-    width: 62,
-    height: 62,
-    borderRadius: 31,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
@@ -2468,9 +2579,9 @@ const styles = StyleSheet.create({
     marginTop: -2,
   },
   voiceSubmitButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(196, 74, 0, 0.12)",
@@ -2479,46 +2590,47 @@ const styles = StyleSheet.create({
   },
   voiceSubmitButtonText: {
     color: palette.accent,
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: "800",
-    lineHeight: 24,
+    lineHeight: 18,
   },
-  voiceStopSquare: {
-    width: 18,
-    height: 18,
-    borderRadius: 3,
-    backgroundColor: "#F3E7D8",
-  },
-  bottomNav: {
-    position: "absolute",
-    left: 18,
-    right: 18,
-    backgroundColor: palette.navBg,
-    borderRadius: 28,
-    paddingHorizontal: 10,
-    paddingVertical: 16,
+  topNav: {
+    marginHorizontal: 18,
+    marginTop: 10,
+    paddingHorizontal: 2,
+    paddingVertical: 2,
     flexDirection: "row",
     justifyContent: "space-between",
-    borderWidth: 1,
-    borderColor: palette.border,
   },
   navItem: {
     flex: 1,
     alignItems: "center",
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "transparent",
+  },
+  navItemActive: {
+    borderBottomColor: "rgba(196, 74, 0, 0.34)",
   },
   navText: {
-    fontSize: 16,
+    fontSize: 15,
     color: palette.inkSoft,
-    fontWeight: "600",
+    fontWeight: "500",
   },
   navTextActive: {
-    color: palette.ink,
-    fontWeight: "800",
+    color: palette.accent,
+    fontWeight: "700",
+  },
+  todayScreen: {
+    gap: 0,
+  },
+  todayEmptyText: {
+    color: palette.inkSoft,
+    fontSize: 14,
+    lineHeight: 20,
   },
   todayList: {
-    marginTop: 6,
-    borderTopWidth: 1,
-    borderTopColor: "rgba(53, 47, 39, 0.12)",
+    marginTop: 0,
   },
   todayRow: {
     flexDirection: "row",
