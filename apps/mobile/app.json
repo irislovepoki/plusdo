@@ -35,9 +35,10 @@
     },
     "plugins": [
       [
-        "expo-audio",
+        "expo-speech-recognition",
         {
-          "microphonePermission": "允许 PlusDo 使用麦克风，把你的语音转成提问和待办。"
+          "microphonePermission": "允许 PlusDo 使用麦克风，把你的语音直接转成待办。",
+          "speechRecognitionPermission": "允许 PlusDo 使用系统语音识别，把你的语音直接转成文字。"
         }
       ]
     ]

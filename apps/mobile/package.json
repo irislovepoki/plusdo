@@ -5,8 +5,8 @@
   "scripts": {
     "start": "expo start",
     "start:ci": "CI=1 expo start --port 8082",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
     "web": "expo start --web",
     "eas:build:ios": "eas build --platform ios",
     "eas:build:android": "eas build --platform android"
@@ -15,7 +15,8 @@
     "@expo/vector-icons": "^15.1.1",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "expo": "~55.0.5",
-    "expo-audio": "~55.0.8",
+    "expo-dev-client": "~55.0.16",
+    "expo-speech-recognition": "^3.1.1",
     "expo-status-bar": "~55.0.4",
     "react": "19.2.0",
     "react-dom": "19.2.0",

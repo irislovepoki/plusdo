@@ -1,14 +1,16 @@
-import {
-  RecordingPresets,
-  requestRecordingPermissionsAsync,
-  setAudioModeAsync,
-  useAudioRecorder,
-} from "expo-audio";
+import { requireOptionalNativeModule } from "expo";
+import type {
+  ExpoSpeechRecognitionErrorEvent,
+  ExpoSpeechRecognitionNativeEventMap,
+  ExpoSpeechRecognitionOptions,
+  ExpoSpeechRecognitionResultEvent,
+} from "expo-speech-recognition";
 import { StatusBar } from "expo-status-bar";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import {
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -54,7 +56,25 @@ type VoiceComposerState =
   | "processing"
   | "error";
 
+type SpeechRecognitionModule = {
+  addListener<K extends keyof ExpoSpeechRecognitionNativeEventMap>(
+    eventName: K,
+    listener: (event: ExpoSpeechRecognitionNativeEventMap[K]) => void,
+  ): {
+    remove: () => void;
+  };
+  start: (options: ExpoSpeechRecognitionOptions) => void;
+  stop: () => void;
+  abort: () => void;
+  requestPermissionsAsync: () => Promise<{ granted: boolean; canAskAgain: boolean }>;
+  requestMicrophonePermissionsAsync: () => Promise<{ granted: boolean; canAskAgain: boolean }>;
+  supportsOnDeviceRecognition: () => boolean;
+  isRecognitionAvailable: () => boolean;
+};
+
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8787";
+const speechRecognitionModule =
+  requireOptionalNativeModule<SpeechRecognitionModule>("ExpoSpeechRecognition");
 
 const palette = {
   appBg: "#D8CEBE",
@@ -187,9 +207,9 @@ const clusterOrder: Array<{
 
 const tabLabel: Record<Tab, string> = {
   inbox: "首页",
-  list: "清单",
+  list: "所有",
   today: "今天",
-  plan: "计划",
+  plan: "日历",
   settings: "设置",
 };
 
@@ -373,15 +393,24 @@ function voiceComposerSubmitLabel(target: VoiceComposerTarget): string {
   return target === "ask" ? "✓" : "✓";
 }
 
-function audioMimeTypeFromUri(uri: string): string {
-  const lowered = uri.toLowerCase();
+function mergeRecognizedText(base: string, transcript: string, target: VoiceInputTarget): string {
+  const normalizedBase = base.trim();
+  const normalizedTranscript = transcript.trim();
 
-  if (lowered.endsWith(".wav")) return "audio/wav";
-  if (lowered.endsWith(".webm")) return "audio/webm";
-  if (lowered.endsWith(".caf")) return "audio/x-caf";
-  if (lowered.endsWith(".mp3")) return "audio/mpeg";
-  if (lowered.endsWith(".aac")) return "audio/aac";
-  return "audio/mp4";
+  if (!normalizedTranscript) return normalizedBase;
+  if (!normalizedBase) return normalizedTranscript;
+
+  return target === "composer"
+    ? `${normalizedBase}\n${normalizedTranscript}`
+    : `${normalizedBase} ${normalizedTranscript}`;
+}
+
+function nativeSpeechUnavailableMessage(): string {
+  if (Platform.OS === "ios") {
+    return "当前不是 iOS 开发版，苹果原生听写还不能用。";
+  }
+
+  return "当前设备不支持原生语音转录。";
 }
 
 function isSameDay(lhs: Date, rhs: Date): boolean {
@@ -622,7 +651,6 @@ function inferLocalTasks(
 
 function MainScreen() {
   const insets = useSafeAreaInsets();
-  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [activeTab, setActiveTab] = useState<Tab>("inbox");
   const [query, setQuery] = useState("");
   const [captures, setCaptures] = useState<CaptureRecord[]>(seedCaptures);
@@ -652,6 +680,10 @@ function MainScreen() {
   const [openCategoryMenuItemId, setOpenCategoryMenuItemId] = useState<string | null>(null);
   const [hasHydratedStorage, setHasHydratedStorage] = useState(false);
   const voiceDraftRef = useRef("");
+  const activeVoiceInputTargetRef = useRef<VoiceInputTarget | null>(null);
+  const recognitionBaseRef = useRef("");
+  const recognitionTranscriptRef = useRef("");
+  const voiceComposerTargetRef = useRef<VoiceComposerTarget>("capture");
 
   useEffect(() => {
     let cancelled = false;
@@ -702,6 +734,10 @@ function MainScreen() {
     if (!hasHydratedStorage) return;
     void AsyncStorage.setItem(ITEMS_STORAGE_KEY, JSON.stringify(items));
   }, [hasHydratedStorage, items]);
+
+  useEffect(() => {
+    voiceComposerTargetRef.current = voiceComposerTarget;
+  }, [voiceComposerTarget]);
 
   const grouped = useMemo(() => {
     const ordered = [...items].sort((lhs, rhs) => {
@@ -778,82 +814,138 @@ function MainScreen() {
     setAskResult("现在还没有找到明显匹配，你可以去清单页回看原话。");
   };
 
-  const transcribeRecording = async (uri: string, target: VoiceInputTarget) => {
-    const fileName = uri.split("/").pop() ?? `voice-${Date.now()}.m4a`;
-    const form = new FormData();
+  const resetRecognitionSession = useEffectEvent(() => {
+    activeVoiceInputTargetRef.current = null;
+    recognitionBaseRef.current = "";
+    recognitionTranscriptRef.current = "";
+    setActiveVoiceInputTarget(null);
+    setIsRecording(false);
+    setIsVoiceProcessing(false);
+  });
 
-    form.append("file", {
-      uri,
-      name: fileName,
-      type: audioMimeTypeFromUri(uri),
-    } as unknown as Blob);
+  const applyRecognitionTranscript = useEffectEvent(
+    (target: VoiceInputTarget, transcript: string) => {
+      const merged = mergeRecognizedText(recognitionBaseRef.current, transcript, target);
 
-    setIsVoiceProcessing(true);
-    if (target === "composer") {
-      setVoiceComposerState("processing");
-      setVoiceHint(processingVoiceHint(voiceComposerTarget));
-    }
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/transcribe`, {
-        method: "POST",
-        body: form,
-      });
-      const payload = (await response.json()) as
-        | {
-            transcript?: string;
-            error?: string;
-            detail?: string;
-          }
-        | undefined;
-
-      if (!response.ok || payload?.error || !payload?.transcript) {
-        const detail = payload?.detail ?? payload?.error ?? "转写失败";
-        throw new Error(detail);
-      }
-
-      const normalized = payload.transcript.trim();
       if (target === "query") {
         setAskResult("");
-        setQuery((current) => {
-          const trimmedCurrent = current.trim();
-          if (normalized.length === 0) return trimmedCurrent;
-          return trimmedCurrent.length > 0 ? `${trimmedCurrent} ${normalized}` : normalized;
-        });
-      } else {
-        const currentDraft = voiceDraftRef.current.trim();
-        const mergedDraft =
-          normalized.length === 0
-            ? currentDraft
-            : currentDraft.length > 0
-              ? `${currentDraft}\n${normalized}`
-              : normalized;
+        setQuery(merged);
+        return;
+      }
 
-        voiceDraftRef.current = mergedDraft;
-        setVoiceDraft(mergedDraft);
-        if (normalized.length > 0) {
-          setHasComposerTranscription(true);
+      voiceDraftRef.current = merged;
+      setVoiceDraft(merged);
+      if (transcript.trim().length > 0) {
+        setHasComposerTranscription(true);
+      }
+    },
+  );
+
+  const finishRecognitionSession = useEffectEvent(
+    (target: VoiceInputTarget, transcript: string) => {
+      const normalized = transcript.trim();
+
+      if (target === "query") {
+        if (normalized.length === 0) {
+          setAskResult("没有听到内容，可以再试一次。");
         }
+      } else {
         setVoiceComposerState("idle");
         setVoiceHint(
-          mergedDraft.length > 0
-            ? pausedVoiceHint(voiceComposerTarget)
+          normalized.length > 0
+            ? pausedVoiceHint(voiceComposerTargetRef.current)
             : "没有听到内容，可以再试一次。",
         );
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "语音转录失败";
+
+      resetRecognitionSession();
+    },
+  );
+
+  const failRecognitionSession = useEffectEvent(
+    (target: VoiceInputTarget, message: string, restoreBase: boolean) => {
+      if (restoreBase) {
+        const base = recognitionBaseRef.current.trim();
+        if (target === "query") {
+          setQuery(base);
+        } else {
+          voiceDraftRef.current = base;
+          setVoiceDraft(base);
+        }
+      }
+
       if (target === "query") {
-        setAskResult(`语音转录失败: ${message}`);
+        setAskResult(message);
       } else {
         setVoiceComposerState("error");
-        setVoiceHint(`语音转录失败: ${message}`);
+        setVoiceHint(message);
       }
-    } finally {
-      setIsVoiceProcessing(false);
-      setActiveVoiceInputTarget(null);
-    }
-  };
+
+      resetRecognitionSession();
+    },
+  );
+
+  useEffect(() => {
+    if (!speechRecognitionModule) return;
+
+    const resultSubscription = speechRecognitionModule.addListener(
+      "result",
+      (event: ExpoSpeechRecognitionResultEvent) => {
+        const target = activeVoiceInputTargetRef.current;
+        if (!target) return;
+
+        const transcript = event.results[0]?.transcript?.trim() ?? "";
+        recognitionTranscriptRef.current = transcript;
+        applyRecognitionTranscript(target, transcript);
+
+        if (event.isFinal) {
+          finishRecognitionSession(target, transcript);
+        }
+      },
+    );
+
+    const endSubscription = speechRecognitionModule.addListener("end", () => {
+      const target = activeVoiceInputTargetRef.current;
+      if (!target) return;
+
+      finishRecognitionSession(target, recognitionTranscriptRef.current);
+    });
+
+    const errorSubscription = speechRecognitionModule.addListener(
+      "error",
+      (event: ExpoSpeechRecognitionErrorEvent) => {
+        const target = activeVoiceInputTargetRef.current;
+        if (!target) return;
+
+        if (event.error === "aborted") {
+          resetRecognitionSession();
+          return;
+        }
+
+        const message =
+          event.error === "no-speech" || event.error === "speech-timeout"
+            ? "没有听到内容，可以再试一次。"
+            : `语音转录失败: ${event.message || event.error}`;
+        failRecognitionSession(target, message, true);
+      },
+    );
+
+    const nomatchSubscription = speechRecognitionModule.addListener("nomatch", () => {
+      recognitionTranscriptRef.current = "";
+    });
+
+    return () => {
+      resultSubscription.remove();
+      endSubscription.remove();
+      errorSubscription.remove();
+      nomatchSubscription.remove();
+    };
+  }, [
+    applyRecognitionTranscript,
+    failRecognitionSession,
+    finishRecognitionSession,
+    resetRecognitionSession,
+  ]);
 
   const organizeTranscript = async (input: string, forcedCategory: Category | null = null) => {
     const normalized = input.trim();
@@ -1127,81 +1219,112 @@ function MainScreen() {
     setEditingGridTitle("");
   };
 
-  const stopNativeRecording = async (shouldTranscribe: boolean) => {
-    const target = activeVoiceInputTarget;
+  const stopNativeRecording = (shouldTranscribe: boolean) => {
+    const target = activeVoiceInputTargetRef.current;
 
-    try {
-      await audioRecorder.stop();
-    } catch (_error) {
-      // Ignore recorder stop races when closing quickly.
-    } finally {
-      setIsRecording(false);
-      await setAudioModeAsync({
-        allowsRecording: false,
-        playsInSilentMode: true,
-      }).catch(() => undefined);
+    if (!speechRecognitionModule || !target) {
+      resetRecognitionSession();
+      return;
     }
 
     if (!shouldTranscribe) {
-      setActiveVoiceInputTarget(null);
-      return;
-    }
-
-    const recorderUri = audioRecorder.uri ?? audioRecorder.getStatus().url;
-    if (!recorderUri) {
-      if (target === "query") {
-        setAskResult("没有拿到录音文件，可以再试一次。");
-      } else if (target === "composer") {
-        setVoiceComposerState("error");
-        setVoiceHint("没有拿到录音文件，可以再试一次。");
+      try {
+        speechRecognitionModule.abort();
+      } catch {
+        resetRecognitionSession();
       }
-      setActiveVoiceInputTarget(null);
       return;
     }
 
-    if (!target) {
-      setActiveVoiceInputTarget(null);
-      return;
+    setIsRecording(false);
+    setIsVoiceProcessing(true);
+    if (target === "composer") {
+      setVoiceComposerState("processing");
+      setVoiceHint(processingVoiceHint(voiceComposerTargetRef.current));
     }
 
-    await transcribeRecording(recorderUri, target);
+    try {
+      speechRecognitionModule.stop();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "无法停止语音识别";
+      failRecognitionSession(target, `语音转录失败: ${message}`, true);
+    }
   };
 
   const startNativeRecording = async (target: VoiceInputTarget) => {
+    if (!speechRecognitionModule) {
+      const message = nativeSpeechUnavailableMessage();
+      if (target === "query") {
+        setAskResult(message);
+      } else {
+        setVoiceComposerState("error");
+        setVoiceHint(message);
+      }
+      return;
+    }
+
+    if (!speechRecognitionModule.isRecognitionAvailable()) {
+      const message = "当前设备暂时不能使用系统语音识别。";
+      if (target === "query") {
+        setAskResult(message);
+      } else {
+        setVoiceComposerState("error");
+        setVoiceHint(message);
+      }
+      return;
+    }
+
+    const prefersOnDeviceRecognition =
+      Platform.OS === "ios" && speechRecognitionModule.supportsOnDeviceRecognition();
+
     try {
-      const permission = await requestRecordingPermissionsAsync();
+      const permission = prefersOnDeviceRecognition
+        ? await speechRecognitionModule.requestMicrophonePermissionsAsync()
+        : await speechRecognitionModule.requestPermissionsAsync();
       if (!permission.granted) {
+        const message = "没有语音权限，请先在系统设置里允许麦克风和语音识别。";
         if (target === "query") {
-          setAskResult("没有麦克风权限，请先允许录音。");
-        } else if (target === "composer") {
+          setAskResult(message);
+        } else {
           setVoiceComposerState("error");
-          setVoiceHint("没有麦克风权限，请先允许录音。");
+          setVoiceHint(message);
         }
         return;
       }
 
-      await setAudioModeAsync({
-        allowsRecording: true,
-        playsInSilentMode: true,
-      });
-      await audioRecorder.prepareToRecordAsync();
-      audioRecorder.record();
+      recognitionBaseRef.current = target === "query" ? query : voiceDraftRef.current;
+      recognitionTranscriptRef.current = "";
+      activeVoiceInputTargetRef.current = target;
+      setActiveVoiceInputTarget(target);
+      setIsVoiceProcessing(false);
+      setIsRecording(true);
+
       if (target === "query") {
         setAskResult("");
-      }
-      setActiveVoiceInputTarget(target);
-      setIsRecording(true);
-      if (target === "composer") {
+      } else {
         setVoiceComposerState("listening");
-        setVoiceHint(listeningVoiceHint(voiceComposerTarget));
+        setVoiceHint(listeningVoiceHint(voiceComposerTargetRef.current));
       }
+
+      speechRecognitionModule.start({
+        lang: "zh-CN",
+        interimResults: true,
+        maxAlternatives: 1,
+        continuous: false,
+        addsPunctuation: true,
+        requiresOnDeviceRecognition: prefersOnDeviceRecognition,
+        iosTaskHint: target === "query" ? "search" : "dictation",
+        contextualStrings: ["清单", "购物", "工作", "关系", "生活", "旅行", "提醒", "今天"],
+      });
     } catch (error) {
+      activeVoiceInputTargetRef.current = null;
       setActiveVoiceInputTarget(null);
       setIsRecording(false);
-      const message = error instanceof Error ? error.message : "无法开始录音";
+      setIsVoiceProcessing(false);
+      const message = error instanceof Error ? error.message : "无法开始系统语音识别";
       if (target === "query") {
         setAskResult(`语音录音失败: ${message}`);
-      } else if (target === "composer") {
+      } else {
         setVoiceComposerState("error");
         setVoiceHint(`语音录音失败: ${message}`);
       }
@@ -1212,7 +1335,7 @@ function MainScreen() {
     if (isVoiceProcessing) return;
 
     if (isComposerRecording) {
-      void stopNativeRecording(true);
+      stopNativeRecording(true);
       return;
     }
 
@@ -1272,7 +1395,7 @@ function MainScreen() {
     if (isVoiceComposerOpen) return;
 
     if (activeVoiceInputTarget === "composer" && isRecording) {
-      void stopNativeRecording(false);
+      stopNativeRecording(false);
       return;
     }
 
@@ -1288,7 +1411,7 @@ function MainScreen() {
 
   useEffect(() => {
     return () => {
-      void stopNativeRecording(false);
+      stopNativeRecording(false);
     };
   }, []);
 
@@ -1307,7 +1430,7 @@ function MainScreen() {
           disabled={isQueryVoiceProcessing}
           onPress={() => {
             if (isQueryRecording) {
-              void stopNativeRecording(true);
+              stopNativeRecording(true);
               return;
             }
 
@@ -1720,7 +1843,14 @@ function MainScreen() {
         />
       ) : null}
 
-      <View style={[styles.voiceComposerDock, { bottom: 14 + insets.bottom }]}>
+      <View
+        style={[
+          styles.voiceComposerDock,
+          {
+            paddingBottom: 12 + insets.bottom,
+          },
+        ]}
+      >
         <View style={styles.voiceComposerTopRow}>
           <Pressable
             hitSlop={8}
@@ -1832,15 +1962,35 @@ function MainScreen() {
           </View>
         ) : null}
 
-        {(isComposerRecording || isComposerVoiceProcessing) ? (
-          <View style={styles.voiceStatusBanner}>
+        {(isComposerRecording || isComposerVoiceProcessing || voiceComposerState === "error") ? (
+          <View
+            style={[
+              styles.voiceStatusBanner,
+              voiceComposerState === "error" ? styles.voiceStatusBannerError : null,
+            ]}
+          >
             <MaterialCommunityIcons
-              name={isComposerRecording ? "record-circle-outline" : "timer-sand"}
+              name={
+                voiceComposerState === "error"
+                  ? "alert-circle-outline"
+                  : isComposerRecording
+                    ? "record-circle-outline"
+                    : "timer-sand"
+              }
               size={14}
-              color={palette.accent}
+              color={voiceComposerState === "error" ? "#8C4325" : palette.accent}
             />
-            <Text style={styles.voiceStatusText}>
-              {isComposerRecording ? "正在录音，点话筒停止" : "正在转录..."}
+            <Text
+              style={[
+                styles.voiceStatusText,
+                voiceComposerState === "error" ? styles.voiceStatusTextError : null,
+              ]}
+            >
+              {voiceComposerState === "error"
+                ? voiceHint
+                : isComposerRecording
+                  ? "正在录音，点话筒停止"
+                  : "正在转录..."}
             </Text>
           </View>
         ) : null}
@@ -2349,15 +2499,16 @@ const styles = StyleSheet.create({
   },
   voiceComposerDock: {
     position: "absolute",
-    left: 18,
-    right: 18,
+    left: 0,
+    right: 0,
+    bottom: 0,
     zIndex: 12,
-    borderRadius: 28,
-    padding: 16,
+    paddingTop: 12,
+    paddingHorizontal: 18,
     gap: 12,
-    backgroundColor: "rgba(239, 231, 218, 0.98)",
-    borderWidth: 1,
-    borderColor: palette.border,
+    backgroundColor: palette.appBg,
+    borderTopWidth: 1,
+    borderTopColor: palette.border,
   },
   voiceComposerBackdrop: {
     position: "absolute",
@@ -2478,10 +2629,16 @@ const styles = StyleSheet.create({
     gap: 6,
     paddingTop: 2,
   },
+  voiceStatusBannerError: {
+    paddingVertical: 6,
+  },
   voiceStatusText: {
     color: palette.accent,
     fontSize: 12,
     fontWeight: "700",
+  },
+  voiceStatusTextError: {
+    color: "#8C4325",
   },
   voiceListPicker: {
     flexDirection: "row",
