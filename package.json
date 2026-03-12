@@ -4,6 +4,9 @@
   "private": true,
   "scripts": {
     "mobile": "npm --prefix apps/mobile run start:ci",
+    "mobile:dev": "npm --prefix apps/mobile run dev:ios",
+    "mobile:reset": "npm --prefix apps/mobile run dev:reset",
+    "mobile:ios": "npm --prefix apps/mobile run ios:sim",
     "server": "npm --prefix apps/server run dev",
     "dev": "concurrently \"npm run server\" \"npm run mobile\"",
     "build:server": "npm --prefix apps/server run build"

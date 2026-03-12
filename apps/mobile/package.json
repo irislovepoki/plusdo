@@ -5,8 +5,11 @@
   "scripts": {
     "start": "expo start",
     "start:ci": "CI=1 expo start --port 8082",
+    "dev:ios": "expo start --dev-client --port 8082",
+    "dev:reset": "expo start --dev-client --port 8082 --clear",
     "android": "expo run:android",
     "ios": "expo run:ios",
+    "ios:sim": "expo run:ios -d \"iPhone 17 Pro\" -p 8082",
     "web": "expo start --web",
     "eas:build:ios": "eas build --platform ios",
     "eas:build:android": "eas build --platform android"

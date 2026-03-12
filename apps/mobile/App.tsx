@@ -25,12 +25,17 @@ import {
 } from "react-native-safe-area-context";
 import { GestureHandlerRootView, Swipeable } from "react-native-gesture-handler";
 
-type Tab = "inbox" | "list" | "today" | "plan" | "settings";
-type Category = "work" | "shopping" | "relationships" | "life" | "travel";
+type PrimaryTab = "inbox" | "assistant" | "today" | "plan";
+type SecondaryTab = "list" | "settings";
+type Tab = PrimaryTab | SecondaryTab;
+type Category = "work" | "shopping" | "relationships" | "life" | "travel" | "triage";
 type CertaintyTier = "confirmed" | "direct" | "suggestion";
 type VoiceComposerTarget = "capture" | "ask";
 type VoiceInputTarget = "query" | "composer";
+type AssistantMessageTone = "default" | "memory" | "plan" | "status";
 type ComposerCategoryChoice = "list" | Category;
+type ComposerPriority = "normal" | "important" | "urgent";
+type ComposerReminder = "off" | "tonight" | "tomorrowMorning";
 
 type CaptureRecord = {
   id: string;
@@ -48,6 +53,47 @@ type TodoItem = {
   sourceSnippet: string;
   reasoning: string;
   createdAt: string;
+};
+
+type AssistantTaskEntry = {
+  category: Category;
+  title: string;
+  sourceSnippet: string;
+  timeLabel?: string;
+  priorityLabel?: string;
+  reminderLabel?: string;
+};
+
+type AssistantMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  tone: AssistantMessageTone;
+  taskListTitle?: string;
+  tasks?: AssistantTaskEntry[];
+};
+
+type AssistantIntent = "create_tasks" | "search_tasks" | "plan" | "prioritize" | "chat";
+
+type AssistantApiTask = {
+  title?: string;
+  reasoning?: string;
+  category?: string;
+  confidenceScore?: number;
+  dueDateISO8601?: string | null;
+  timeHint?: string;
+  priorityHint?: string;
+  reminderDateISO8601?: string | null;
+  reminderHint?: string;
+  sourceSnippet?: string;
+};
+
+type AssistantApiResponse = {
+  reply?: string;
+  intent?: AssistantIntent;
+  tasks?: AssistantApiTask[];
+  error?: string;
+  detail?: string;
 };
 
 type VoiceComposerState =
@@ -78,13 +124,14 @@ const speechRecognitionModule =
 
 const palette = {
   appBg: "#D8CEBE",
-  ink: "#2F2D29",
-  inkMuted: "#6E675B",
-  inkSoft: "#8C8476",
+  ink: "#3A2B21",
+  inkMuted: "#725F50",
+  inkSoft: "#92806F",
   inputBg: "#E0D7C8",
   panelWork: "#B39670",
   panelShopping: "#C7BCAB",
   panelRelationships: "#DDD6CB",
+  panelTriage: "#E8DED2",
   panelLife: "#747758",
   panelLifeInk: "#ECE6DA",
   panelTravel: "#8A8765",
@@ -113,7 +160,7 @@ const seedCaptures: CaptureRecord[] = [
 const seedItems: TodoItem[] = [
   {
     id: "item-1",
-    title: "去超市买番茄",
+    title: "买番茄",
     category: "shopping",
     certainty: "direct",
     dueDateKey: "2026-03-11",
@@ -124,7 +171,7 @@ const seedItems: TodoItem[] = [
   },
   {
     id: "item-2",
-    title: "买点蔬菜",
+    title: "买蔬菜",
     category: "shopping",
     certainty: "suggestion",
     dueDateKey: "2026-03-11",
@@ -135,7 +182,7 @@ const seedItems: TodoItem[] = [
   },
   {
     id: "item-3",
-    title: "准备生日礼物",
+    title: "购物 买生日礼物",
     category: "relationships",
     certainty: "direct",
     dueDateKey: "2026-03-15",
@@ -203,29 +250,31 @@ const clusterOrder: Array<{
     rowColor: palette.rowBgDark,
     rowInkColor: palette.panelTravelInk,
   },
+  {
+    key: "triage",
+    title: "待整理",
+    panelColor: palette.panelTriage,
+    inkColor: palette.ink,
+    mutedInkColor: "rgba(47,45,41,0.62)",
+    rowColor: palette.rowBgLight,
+    rowInkColor: palette.ink,
+  },
 ];
 
 const tabLabel: Record<Tab, string> = {
   inbox: "首页",
+  assistant: "助理",
   list: "所有",
   today: "今天",
   plan: "日历",
   settings: "设置",
 };
 
-const certaintyLabel: Record<CertaintyTier, string> = {
-  confirmed: "100%",
-  direct: "70%",
-  suggestion: "40%",
-};
-
-const certaintyHint: Record<CertaintyTier, string> = {
-  confirmed: "已确认",
-  direct: "高置信",
-  suggestion: "弱建议",
-};
+const navTabs: Tab[] = ["inbox", "assistant", "today", "plan", "list", "settings"];
+const listScreenDescription = "这里保留你的原话，以及 AI 从原话里整理出的事项，方便回溯。";
 
 const calendarWeekdayLabels = ["一", "二", "三", "四", "五", "六", "日"] as const;
+const fullWeekdayLabels = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
 
 function isCaptureRecord(value: unknown): value is CaptureRecord {
   if (!value || typeof value !== "object") {
@@ -251,7 +300,8 @@ function isTodoItem(value: unknown): value is TodoItem {
       item.category === "shopping" ||
       item.category === "relationships" ||
       item.category === "life" ||
-      item.category === "travel") &&
+      item.category === "travel" ||
+      item.category === "triage") &&
     (item.certainty === "confirmed" ||
       item.certainty === "direct" ||
       item.certainty === "suggestion") &&
@@ -307,12 +357,28 @@ function categoryTitle(category: Category): string {
       return "生活";
     case "travel":
       return "旅行";
+    case "triage":
+      return "待整理";
   }
 }
 
 function composerCategoryTitle(choice: ComposerCategoryChoice): string {
   if (choice === "list") return "清单";
   return categoryTitle(choice);
+}
+
+function nextComposerCategoryChoice(choice: ComposerCategoryChoice): ComposerCategoryChoice {
+  const order: ComposerCategoryChoice[] = [
+    "list",
+    "shopping",
+    "work",
+    "relationships",
+    "life",
+    "travel",
+    "triage",
+  ];
+  const currentIndex = order.indexOf(choice);
+  return order[(currentIndex + 1) % order.length] ?? "list";
 }
 
 function nextCategory(category: Category): Category {
@@ -326,7 +392,43 @@ function nextCategory(category: Category): Category {
     case "life":
       return "travel";
     case "travel":
+      return "triage";
+    case "triage":
       return "work";
+  }
+}
+
+const composerPriorityLabel: Record<ComposerPriority, string> = {
+  normal: "普通",
+  important: "重要",
+  urgent: "紧急",
+};
+
+function nextComposerPriority(priority: ComposerPriority): ComposerPriority {
+  switch (priority) {
+    case "normal":
+      return "important";
+    case "important":
+      return "urgent";
+    case "urgent":
+      return "normal";
+  }
+}
+
+const composerReminderLabel: Record<ComposerReminder, string> = {
+  off: "关闭",
+  tonight: "今晚",
+  tomorrowMorning: "明早",
+};
+
+function nextComposerReminder(reminder: ComposerReminder): ComposerReminder {
+  switch (reminder) {
+    case "off":
+      return "tonight";
+    case "tonight":
+      return "tomorrowMorning";
+    case "tomorrowMorning":
+      return "off";
   }
 }
 
@@ -359,6 +461,11 @@ function categoryChipAppearance(category: Category): {
       return {
         backgroundColor: palette.panelTravel,
         textColor: palette.panelTravelInk,
+      };
+    case "triage":
+      return {
+        backgroundColor: palette.panelTriage,
+        textColor: palette.ink,
       };
   }
 }
@@ -427,6 +534,33 @@ function startOfDay(date: Date): Date {
   return next;
 }
 
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function nextComposerDueDate(date: Date): Date {
+  const today = startOfDay(new Date());
+  const tomorrow = addDays(today, 1);
+  const dayAfterTomorrow = addDays(today, 2);
+
+  if (isSameDay(date, today)) return tomorrow;
+  if (isSameDay(date, tomorrow)) return dayAfterTomorrow;
+  return today;
+}
+
+function formatComposerDueDateLabel(date: Date): string {
+  const today = startOfDay(new Date());
+  const tomorrow = addDays(today, 1);
+  const dayAfterTomorrow = addDays(today, 2);
+
+  if (isSameDay(date, today)) return "今天";
+  if (isSameDay(date, tomorrow)) return "明天";
+  if (isSameDay(date, dayAfterTomorrow)) return "后天";
+  return `${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
 function dueDateKeyFromDate(date: Date): string {
   const normalized = startOfDay(date);
   return [
@@ -441,14 +575,32 @@ function dateFromDueDateKey(dueDateKey: string): Date {
   return new Date(year, (month || 1) - 1, day || 1);
 }
 
-function formatDueDateLabel(date: Date): string {
-  const today = new Date();
-  if (isSameDay(date, today)) return "今天";
-  return `${date.getMonth() + 1}月${date.getDate()}日`;
-}
-
 function formatMonthLabel(date: Date): string {
   return `${date.getFullYear()}年${date.getMonth() + 1}月`;
+}
+
+function formatCompactDateCode(date: Date): string {
+  const year = String(date.getFullYear()).slice(-2);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}${month}${day}`;
+}
+
+function buildComposerMetaSummary(
+  priority: ComposerPriority,
+  reminder: ComposerReminder,
+): string | null {
+  const parts: string[] = [];
+
+  if (priority !== "normal") {
+    parts.push(`优先级${composerPriorityLabel[priority]}`);
+  }
+
+  if (reminder !== "off") {
+    parts.push(`提醒${composerReminderLabel[reminder]}`);
+  }
+
+  return parts.length > 0 ? parts.join("，") : null;
 }
 
 function buildCalendarDays(month: Date): Array<Date | null> {
@@ -480,8 +632,227 @@ function formatCaptureTime(iso: string): string {
   ).padStart(2, "0")}`;
 }
 
+function formatAssistantTimeLabelFromDueDateKey(dueDateKey?: string): string {
+  if (!dueDateKey) {
+    return "待定";
+  }
+
+  const date = dateFromDueDateKey(dueDateKey);
+  return formatComposerDueDateLabel(date);
+}
+
+function formatAssistantOptionalTimeLabelFromDueDateKey(dueDateKey?: string): string | undefined {
+  if (!dueDateKey) {
+    return undefined;
+  }
+
+  return formatAssistantTimeLabelFromDueDateKey(dueDateKey);
+}
+
+function formatAssistantReminderLabelFromISO8601(value: string | null | undefined): string | undefined {
+  const dueDateKey = dueDateKeyFromISO8601(value);
+  if (!dueDateKey) {
+    return undefined;
+  }
+
+  return `${formatAssistantTimeLabelFromDueDateKey(dueDateKey)}提醒`;
+}
+
+function compactAssistantField(value: string | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function formatAssistantTaskLine(task: Pick<
+  AssistantTaskEntry,
+  "category" | "title" | "timeLabel" | "priorityLabel" | "reminderLabel"
+>): string {
+  return [
+    categoryTitle(task.category),
+    task.title,
+    compactAssistantField(task.timeLabel),
+    compactAssistantField(task.priorityLabel),
+    compactAssistantField(task.reminderLabel),
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(" ");
+}
+
+function formatAssistantTasksFromItems(items: TodoItem[]): string {
+  return items
+    .map((item) =>
+      formatAssistantTaskLine(
+        buildAssistantTaskEntryFromItem(item),
+      ),
+    )
+    .join("\n");
+}
+
+function buildAssistantTaskEntriesFromItems(items: TodoItem[]): AssistantTaskEntry[] {
+  return items.map((item) => buildAssistantTaskEntryFromItem(item));
+}
+
+function buildAssistantTaskEntryFromItem(item: TodoItem): AssistantTaskEntry {
+  return {
+    category: item.category,
+    title: item.title,
+    sourceSnippet: item.sourceSnippet,
+    timeLabel: formatAssistantTimeLabelFromDueDateKey(resolvedDueDateKey(item)),
+  };
+}
+
+function buildAssistantTaskEntryFromApi(
+  task: AssistantApiTask,
+  fallbackSourceSnippet?: string,
+): AssistantTaskEntry {
+  const category = normalizeCategory(task.category);
+  const title =
+    typeof task.title === "string" && task.title.trim().length > 0
+      ? task.title.trim()
+      : "待整理事项";
+  const timeLabel =
+    compactAssistantField(task.timeHint) ??
+    compactAssistantField(
+      formatAssistantOptionalTimeLabelFromDueDateKey(dueDateKeyFromISO8601(task.dueDateISO8601)),
+    );
+  const priorityLabel = compactAssistantField(task.priorityHint);
+  const reminderLabel =
+    compactAssistantField(task.reminderHint) ??
+    compactAssistantField(formatAssistantReminderLabelFromISO8601(task.reminderDateISO8601));
+
+  return {
+    category,
+    title,
+    sourceSnippet:
+      compactAssistantField(task.sourceSnippet) ??
+      compactAssistantField(fallbackSourceSnippet) ??
+      "未记录原话",
+    ...(timeLabel ? { timeLabel } : {}),
+    ...(priorityLabel ? { priorityLabel } : {}),
+    ...(reminderLabel ? { reminderLabel } : {}),
+  };
+}
+
+function buildRecallAnswer(
+  input: string,
+  items: TodoItem[],
+  capturesById: Record<string, CaptureRecord>,
+): string {
+  const normalized = input.trim();
+  if (!normalized) {
+    return "你可以直接问我最近缺什么、忘了什么，或者今天最重要的是什么。";
+  }
+
+  const matches = items.filter((item) => {
+    const capture = capturesById[item.sourceCaptureId];
+    return (
+      item.title.includes(normalized) ||
+      item.sourceSnippet.includes(normalized) ||
+      capture?.transcript.includes(normalized)
+    );
+  });
+
+  if (matches.length > 0) {
+    return formatAssistantTasksFromItems(matches.slice(0, 3));
+  }
+
+  const shoppingItems = items.filter((item) => item.category === "shopping");
+  if (normalized.includes("买") || normalized.includes("忘") || normalized.includes("缺")) {
+    return shoppingItems.length > 0
+      ? formatAssistantTasksFromItems(shoppingItems.slice(0, 3))
+      : "待整理 购物事项";
+  }
+
+  return "待整理 原话记录";
+}
+
+function buildTodayAnswer(todayItems: TodoItem[]): string {
+  if (todayItems.length === 0) {
+    return "待整理 今天事项";
+  }
+
+  return formatAssistantTasksFromItems(todayItems.slice(0, 3));
+}
+
+function buildImportantAnswer(listItems: TodoItem[]): string {
+  const focusItems = listItems.filter((item) => item.certainty !== "suggestion").slice(0, 3);
+  if (focusItems.length === 0) {
+    return "待整理 重要事项";
+  }
+
+  return formatAssistantTasksFromItems(focusItems);
+}
+
+function buildPlanAnswer(input: string): string {
+  const cleaned = input
+    .replace(/帮我拆一下|帮我拆解一下|帮我拆解|帮我分解|怎么做|如何做|如何|步骤/gu, "")
+    .replace(/[？?]/gu, "")
+    .trim();
+  const subject = cleaned.length > 0 ? cleaned : "这件事";
+
+  return [
+    `我会先把“${subject}”拆成三步：`,
+    "1. 先明确目标、截止时间和你真正想完成的结果。",
+    "2. 把它拆成 2 到 3 个最小动作，先做最容易开始的那一步。",
+    "3. 给最后一步留一个检查点，确认是否还需要补资料、沟通或提醒。",
+  ].join("\n");
+}
+
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function dueDateKeyFromISO8601(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value.trim();
+  return normalized.length >= 10 ? normalized.slice(0, 10) : undefined;
+}
+
+function resolvedDueDateKey(item: Pick<TodoItem, "dueDateKey" | "createdAt">): string {
+  return item.dueDateKey ?? dueDateKeyFromDate(new Date(item.createdAt));
+}
+
+function formatItemDueDateLabel(item: Pick<TodoItem, "dueDateKey" | "createdAt">): string {
+  const date = dateFromDueDateKey(resolvedDueDateKey(item));
+  return `${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+function normalizeTaskTitle(
+  rawTitle: string | undefined,
+  category: Category,
+  transcript: string,
+): string {
+  const title = typeof rawTitle === "string" && rawTitle.trim().length > 0 ? rawTitle.trim() : "待确认事项";
+  const combined = `${title} ${transcript}`;
+
+  if (combined.includes("面包")) {
+    return "买面包";
+  }
+
+  if (combined.includes("猫砂")) {
+    return "买猫砂";
+  }
+
+  if (combined.includes("番茄")) {
+    return "买番茄";
+  }
+
+  if (combined.includes("蔬菜")) {
+    return "买蔬菜";
+  }
+
+  if (combined.includes("生日") && combined.includes("礼物")) {
+    return category === "relationships" ? "购物 买生日礼物" : "买生日礼物";
+  }
+
+  return title;
 }
 
 function normalizeTaskFromAI(
@@ -489,6 +860,7 @@ function normalizeTaskFromAI(
     title?: string;
     category?: string;
     confidenceScore?: number;
+    dueDateISO8601?: string | null;
     sourceSnippet?: string;
     reasoning?: string;
   },
@@ -496,15 +868,21 @@ function normalizeTaskFromAI(
     captureId: string;
     createdAt: string;
     transcript: string;
-    dueDateKey: string;
+    fallbackDueDateKey?: string;
   },
 ): TodoItem {
+  const dueDateKey =
+    dueDateKeyFromISO8601(task.dueDateISO8601) ??
+    context.fallbackDueDateKey ??
+    dueDateKeyFromDate(new Date(context.createdAt));
+  const category = normalizeCategory(task.category);
+
   return {
     id: makeId("item"),
-    title: typeof task.title === "string" && task.title.trim().length > 0 ? task.title.trim() : "待确认事项",
-    category: normalizeCategory(task.category),
+    title: normalizeTaskTitle(task.title, category, context.transcript),
+    category,
     certainty: normalizeCertainty(task.confidenceScore),
-    dueDateKey: context.dueDateKey,
+    ...(dueDateKey ? { dueDateKey } : {}),
     sourceCaptureId: context.captureId,
     sourceSnippet:
       typeof task.sourceSnippet === "string" && task.sourceSnippet.trim().length > 0
@@ -525,6 +903,7 @@ function normalizeCategory(rawCategory: string | undefined): Category {
     case "relationships":
     case "life":
     case "travel":
+    case "triage":
       return rawCategory;
     case "trip":
     case "traveling":
@@ -532,9 +911,8 @@ function normalizeCategory(rawCategory: string | undefined): Category {
     case "home":
     case "living":
       return "life";
-    case "triage":
     default:
-      return "life";
+      return "triage";
   }
 }
 
@@ -543,6 +921,77 @@ function normalizeCertainty(rawScore: number | undefined): CertaintyTier {
     return "direct";
   }
   return "suggestion";
+}
+
+function toneForAssistantIntent(intent: AssistantIntent | undefined): AssistantMessageTone {
+  switch (intent) {
+    case "search_tasks":
+      return "memory";
+    case "plan":
+      return "plan";
+    case "prioritize":
+      return "status";
+    default:
+      return "default";
+  }
+}
+
+function assistantTaskListTitle(intent: AssistantIntent | undefined): string {
+  switch (intent) {
+    case "search_tasks":
+      return "查找到事项";
+    case "create_tasks":
+      return "发布任务";
+    default:
+      return "助理事项";
+  }
+}
+
+function shouldCreateTasksLocally(input: string): boolean {
+  const normalized = input.trim();
+
+  if (normalized.length === 0) {
+    return false;
+  }
+
+  if (
+    /[?？]/u.test(normalized) ||
+    /我是不是|有没有|还有什么|忘了|怎么做|如何|步骤|拆一下|拆解|分解|最重要|优先|谢谢|你好|hello|hi/iu.test(
+      normalized,
+    )
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function matchAssistantTasksToExistingItems(
+  tasks: AssistantApiTask[],
+  items: TodoItem[],
+): TodoItem[] {
+  const remaining = [...items];
+  const matches: TodoItem[] = [];
+
+  tasks.forEach((task) => {
+    const category = normalizeCategory(task.category);
+    const title = normalizeTaskTitle(task.title, category, task.sourceSnippet ?? task.title ?? "");
+    const dueDateKey = dueDateKeyFromISO8601(task.dueDateISO8601);
+    const matchIndex = remaining.findIndex((item) => {
+      if (item.category !== category) return false;
+      if (item.title !== title) return false;
+      return dueDateKey ? resolvedDueDateKey(item) === dueDateKey : true;
+    });
+
+    if (matchIndex >= 0) {
+      const [matchedItem] = remaining.splice(matchIndex, 1);
+      if (matchedItem) {
+        matches.push(matchedItem);
+      }
+    }
+  });
+
+  return matches;
 }
 
 function inferLocalTasks(
@@ -557,7 +1006,7 @@ function inferLocalTasks(
   if (lowered.includes("番茄")) {
     tasks.push({
       id: makeId("item"),
-      title: "去超市买番茄",
+      title: "买番茄",
       category: "shopping",
       certainty: "direct",
       dueDateKey,
@@ -571,7 +1020,7 @@ function inferLocalTasks(
   if (lowered.includes("蔬菜")) {
     tasks.push({
       id: makeId("item"),
-      title: "买点蔬菜",
+      title: "买蔬菜",
       category: "shopping",
       certainty: lowered.includes("买") ? "direct" : "suggestion",
       dueDateKey,
@@ -585,7 +1034,7 @@ function inferLocalTasks(
   if (lowered.includes("生日")) {
     tasks.push({
       id: makeId("item"),
-      title: "准备生日礼物",
+      title: "购物 买生日礼物",
       category: "relationships",
       certainty: "direct",
       dueDateKey,
@@ -593,6 +1042,34 @@ function inferLocalTasks(
       sourceSnippet: "下个月生日",
       reasoning: "生日事件通常需要提前准备礼物或安排。",
       createdAt: new Date(Date.parse(createdAt) + 2000).toISOString(),
+    });
+  }
+
+  if (lowered.includes("面包")) {
+    tasks.push({
+      id: makeId("item"),
+      title: "买面包",
+      category: "shopping",
+      certainty: "direct",
+      dueDateKey,
+      sourceCaptureId: captureId,
+      sourceSnippet: transcript,
+      reasoning: "从原话中识别出明确的购买需求。",
+      createdAt: new Date(Date.parse(createdAt) + 2500).toISOString(),
+    });
+  }
+
+  if (lowered.includes("猫砂")) {
+    tasks.push({
+      id: makeId("item"),
+      title: "买猫砂",
+      category: "shopping",
+      certainty: "direct",
+      dueDateKey,
+      sourceCaptureId: captureId,
+      sourceSnippet: transcript,
+      reasoning: "从补货语义中识别出猫砂采购事项。",
+      createdAt: new Date(Date.parse(createdAt) + 2600).toISOString(),
     });
   }
 
@@ -664,26 +1141,34 @@ function MainScreen() {
   const [voiceDraft, setVoiceDraft] = useState("");
   const [hasComposerTranscription, setHasComposerTranscription] = useState(false);
   const [composerCategoryChoice, setComposerCategoryChoice] = useState<ComposerCategoryChoice>("list");
-  const [isComposerCategoryMenuOpen, setIsComposerCategoryMenuOpen] = useState(false);
-  const [selectedDueDate, setSelectedDueDate] = useState<Date>(() => new Date());
-  const [isDueDatePickerOpen, setIsDueDatePickerOpen] = useState(false);
-  const [calendarMonth, setCalendarMonth] = useState<Date>(() => startOfDay(new Date()));
+  const [selectedDueDate, setSelectedDueDate] = useState<Date>(() => startOfDay(new Date()));
+  const [composerPriority, setComposerPriority] = useState<ComposerPriority>("normal");
+  const [composerReminder, setComposerReminder] = useState<ComposerReminder>("off");
+  const [isManualComposerOptionsVisible, setIsManualComposerOptionsVisible] = useState(false);
+  const [isManualComposerAdvancedOpen, setIsManualComposerAdvancedOpen] = useState(false);
   const [voiceComposerState, setVoiceComposerState] = useState<VoiceComposerState>("idle");
   const [voiceHint, setVoiceHint] = useState(defaultVoiceHint("capture"));
   const [askResult, setAskResult] = useState("");
   const [isAsking, setIsAsking] = useState(false);
+  const [isAssistantResponding, setIsAssistantResponding] = useState(false);
+  const [planSelectedDate, setPlanSelectedDate] = useState<Date>(() => startOfDay(new Date()));
+  const [planCalendarMonth, setPlanCalendarMonth] = useState<Date>(() => startOfDay(new Date()));
+  const [isPlanQuickAddOpen, setIsPlanQuickAddOpen] = useState(false);
+  const [planQuickAddTitle, setPlanQuickAddTitle] = useState("");
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const [editingGridItemId, setEditingGridItemId] = useState<string | null>(null);
   const [editingGridTitle, setEditingGridTitle] = useState("");
-  const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
   const [openCategoryMenuItemId, setOpenCategoryMenuItemId] = useState<string | null>(null);
   const [hasHydratedStorage, setHasHydratedStorage] = useState(false);
+  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
   const voiceDraftRef = useRef("");
   const activeVoiceInputTargetRef = useRef<VoiceInputTarget | null>(null);
   const recognitionBaseRef = useRef("");
   const recognitionTranscriptRef = useRef("");
   const voiceComposerTargetRef = useRef<VoiceComposerTarget>("capture");
+  const isAssistantTab = activeTab === "assistant";
+  const isAssistantInputLocked = isAssistantTab && isAssistantResponding;
 
   useEffect(() => {
     let cancelled = false;
@@ -739,15 +1224,22 @@ function MainScreen() {
     voiceComposerTargetRef.current = voiceComposerTarget;
   }, [voiceComposerTarget]);
 
+  useEffect(() => {
+    const nextTarget: VoiceComposerTarget = isAssistantTab ? "ask" : "capture";
+    setVoiceComposerTarget(nextTarget);
+
+    if (isAssistantTab) {
+      setIsManualComposerOptionsVisible(false);
+      setIsManualComposerAdvancedOpen(false);
+    }
+
+    if (!isRecording && !isVoiceProcessing) {
+      setVoiceHint(defaultVoiceHint(nextTarget));
+    }
+  }, [isAssistantTab, isRecording, isVoiceProcessing]);
+
   const grouped = useMemo(() => {
-    const ordered = [...items].sort((lhs, rhs) => {
-      const lhsWeight = certaintyWeight(lhs.certainty);
-      const rhsWeight = certaintyWeight(rhs.certainty);
-      if (lhsWeight === rhsWeight) {
-        return rhs.createdAt.localeCompare(lhs.createdAt);
-      }
-      return rhsWeight - lhsWeight;
-    });
+    const ordered = [...items].sort((lhs, rhs) => rhs.createdAt.localeCompare(lhs.createdAt));
 
     return {
       work: ordered.filter((it) => it.category === "work"),
@@ -755,6 +1247,7 @@ function MainScreen() {
       relationships: ordered.filter((it) => it.category === "relationships"),
       life: ordered.filter((it) => it.category === "life"),
       travel: ordered.filter((it) => it.category === "travel"),
+      triage: ordered.filter((it) => it.category === "triage"),
     };
   }, [items]);
 
@@ -774,44 +1267,121 @@ function MainScreen() {
     });
   }, [items]);
 
-  const calendarDays = useMemo(() => buildCalendarDays(calendarMonth), [calendarMonth]);
+  const todayItems = useMemo(() => {
+    const todayKey = dueDateKeyFromDate(new Date());
+    return listItems.filter(
+      (item) => item.certainty !== "suggestion" && resolvedDueDateKey(item) === todayKey,
+    );
+  }, [listItems]);
 
-  const isQueryRecording = isRecording && activeVoiceInputTarget === "query";
-  const isQueryVoiceProcessing = isVoiceProcessing && activeVoiceInputTarget === "query";
+  const importantItems = useMemo(() => {
+    return listItems.filter((item) => item.certainty !== "suggestion").slice(0, 3);
+  }, [listItems]);
+
+  const planCalendarDays = useMemo(() => buildCalendarDays(planCalendarMonth), [planCalendarMonth]);
+  const scheduledItemsByDateKey = useMemo(() => {
+    const datedItems = [...items].sort((lhs, rhs) => {
+      const lhsDueDateKey = resolvedDueDateKey(lhs);
+      const rhsDueDateKey = resolvedDueDateKey(rhs);
+
+      if (lhsDueDateKey === rhsDueDateKey) {
+          const certaintyDelta = certaintyWeight(rhs.certainty) - certaintyWeight(lhs.certainty);
+          if (certaintyDelta !== 0) return certaintyDelta;
+          return lhs.createdAt.localeCompare(rhs.createdAt);
+      }
+
+      return lhsDueDateKey.localeCompare(rhsDueDateKey);
+    });
+
+    return datedItems.reduce<Record<string, TodoItem[]>>((accumulator, item) => {
+      const dueDateKey = resolvedDueDateKey(item);
+
+      if (!accumulator[dueDateKey]) {
+        accumulator[dueDateKey] = [];
+      }
+
+      accumulator[dueDateKey].push(item);
+      return accumulator;
+    }, {});
+  }, [items]);
+  const planSelectedDateKey = useMemo(() => dueDateKeyFromDate(planSelectedDate), [planSelectedDate]);
+  const planSelectedItems = useMemo(
+    () => scheduledItemsByDateKey[planSelectedDateKey] ?? [],
+    [planSelectedDateKey, scheduledItemsByDateKey],
+  );
+
   const isComposerRecording = isRecording && activeVoiceInputTarget === "composer";
   const isComposerVoiceProcessing = isVoiceProcessing && activeVoiceInputTarget === "composer";
 
-  const runRecall = (input: string = query) => {
+  const shiftPlanCalendarMonth = (offset: number) => {
+    const nextMonth = new Date(
+      planCalendarMonth.getFullYear(),
+      planCalendarMonth.getMonth() + offset,
+      1,
+    );
+    const nextMonthLastDay = new Date(
+      nextMonth.getFullYear(),
+      nextMonth.getMonth() + 1,
+      0,
+    ).getDate();
+    const nextSelectedDate = startOfDay(
+      new Date(
+        nextMonth.getFullYear(),
+        nextMonth.getMonth(),
+        Math.min(planSelectedDate.getDate(), nextMonthLastDay),
+      ),
+    );
+
+    setPlanCalendarMonth(nextMonth);
+    setPlanSelectedDate(nextSelectedDate);
+    setIsPlanQuickAddOpen(false);
+    setPlanQuickAddTitle("");
+  };
+
+  const selectPlanDate = (date: Date) => {
+    const normalized = startOfDay(date);
+    setPlanSelectedDate(normalized);
+    setPlanCalendarMonth(new Date(normalized.getFullYear(), normalized.getMonth(), 1));
+    setIsPlanQuickAddOpen(false);
+    setPlanQuickAddTitle("");
+  };
+
+  const answerAssistantPrompt = (input: string): AssistantMessage => {
     const normalized = input.trim();
-    if (!normalized) return;
 
-    setQuery(normalized);
-
-    const matches = items.filter((item) => {
-      const capture = capturesById[item.sourceCaptureId];
-      return (
-        item.title.includes(normalized) ||
-        item.sourceSnippet.includes(normalized) ||
-        capture?.transcript.includes(normalized)
-      );
-    });
-
-    if (matches.length > 0) {
-      setAskResult(`你之前提过：${matches.slice(0, 3).map((item) => item.title).join("、")}`);
-      return;
+    if (/怎么做|如何|步骤|拆一下|拆解|分解/gu.test(normalized)) {
+      return {
+        id: makeId("assistant"),
+        role: "assistant",
+        text: buildPlanAnswer(normalized),
+        tone: "plan",
+      };
     }
 
-    const shoppingItems = items.filter((item) => item.category === "shopping");
-    if (normalized.includes("买") || normalized.includes("忘")) {
-      setAskResult(
-        shoppingItems.length > 0
-          ? `购物相关你提过：${shoppingItems.slice(0, 3).map((item) => item.title).join("、")}`
-          : "还没有找到明确的购物事项。",
-      );
-      return;
+    if (/今天|今晚/gu.test(normalized)) {
+      return {
+        id: makeId("assistant"),
+        role: "assistant",
+        text: buildTodayAnswer(todayItems),
+        tone: "status",
+      };
     }
 
-    setAskResult("现在还没有找到明显匹配，你可以去清单页回看原话。");
+    if (/最重要|重要|优先/gu.test(normalized)) {
+      return {
+        id: makeId("assistant"),
+        role: "assistant",
+        text: buildImportantAnswer(listItems),
+        tone: "status",
+      };
+    }
+
+    return {
+      id: makeId("assistant"),
+      role: "assistant",
+      text: buildRecallAnswer(normalized, items, capturesById),
+      tone: "memory",
+    };
   };
 
   const resetRecognitionSession = useEffectEvent(() => {
@@ -947,13 +1517,25 @@ function MainScreen() {
     resetRecognitionSession,
   ]);
 
-  const organizeTranscript = async (input: string, forcedCategory: Category | null = null) => {
+  const organizeTranscript = async (
+    input: string,
+    options: {
+      forcedCategory?: Category | null;
+      dueDate?: Date;
+      metadataNote?: string | null;
+    } = {},
+  ) => {
     const normalized = input.trim();
     if (!normalized) return;
 
+    const forcedCategory = options.forcedCategory ?? null;
+    const dueDate = options.dueDate ?? new Date();
+    const requestTranscript = options.metadataNote
+      ? `${normalized}（${options.metadataNote}）`
+      : normalized;
     const captureId = makeId("capture");
     const createdAt = new Date().toISOString();
-    const dueDateKey = dueDateKeyFromDate(selectedDueDate);
+    const dueDateKey = dueDateKeyFromDate(dueDate);
     const capture: CaptureRecord = {
       id: captureId,
       transcript: normalized,
@@ -969,7 +1551,7 @@ function MainScreen() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          transcript: normalized,
+          transcript: requestTranscript,
           nowISO8601: createdAt,
         }),
       });
@@ -979,6 +1561,7 @@ function MainScreen() {
               title?: string;
               category?: string;
               confidenceScore?: number;
+              dueDateISO8601?: string | null;
               sourceSnippet?: string;
               reasoning?: string;
             }>;
@@ -1006,7 +1589,7 @@ function MainScreen() {
           captureId,
           createdAt: new Date(Date.now() + index * 1000).toISOString(),
           transcript: normalized,
-          dueDateKey,
+          fallbackDueDateKey: dueDateKey,
         }),
       );
       const nextItems = forcedCategory
@@ -1031,14 +1614,25 @@ function MainScreen() {
     }
   };
 
-  const createConfirmedItemFromInput = (input: string, forcedCategory: Category | null = null) => {
+  const createConfirmedItemFromInput = (
+    input: string,
+    options: {
+      forcedCategory?: Category | null;
+      dueDate?: Date;
+      nextTab?: Tab | null;
+      metaSummary?: string | null;
+    } = {},
+  ) => {
     const normalized = input.trim();
     if (!normalized) return;
 
+    const forcedCategory = options.forcedCategory ?? null;
+    const dueDate = options.dueDate ?? new Date();
+    const nextTab = options.nextTab === undefined ? "list" : options.nextTab;
     const createdAt = new Date().toISOString();
     const captureId = makeId("capture");
     const itemId = makeId("item");
-    const dueDateKey = dueDateKeyFromDate(selectedDueDate);
+    const dueDateKey = dueDateKeyFromDate(dueDate);
     const capture: CaptureRecord = {
       id: captureId,
       transcript: normalized,
@@ -1052,16 +1646,35 @@ function MainScreen() {
       dueDateKey,
       sourceCaptureId: captureId,
       sourceSnippet: normalized,
-      reasoning: forcedCategory
-        ? `用户手动输入并指定到${categoryTitle(forcedCategory)}类。`
-        : "用户手动输入并直接确认的事项。",
+      reasoning: [
+        forcedCategory
+          ? `用户手动输入并指定到${categoryTitle(forcedCategory)}类。`
+          : "用户手动输入并直接确认的事项。",
+        options.metaSummary ? `附加设置：${options.metaSummary}。` : null,
+      ]
+        .filter(Boolean)
+        .join(" "),
       createdAt,
     };
 
     setCaptures((current) => [capture, ...current]);
     setItems((current) => [item, ...current]);
     setAskResult("已保存 1 条确认事项。");
-    setActiveTab("list");
+    if (nextTab) {
+      setActiveTab(nextTab);
+    }
+  };
+
+  const submitPlanQuickAdd = () => {
+    const normalized = planQuickAddTitle.trim();
+    if (!normalized) return;
+
+    createConfirmedItemFromInput(normalized, {
+      dueDate: planSelectedDate,
+      nextTab: null,
+    });
+    setPlanQuickAddTitle("");
+    setIsPlanQuickAddOpen(false);
   };
 
   const addItemFromInboxCard = (category: Category) => {
@@ -1103,7 +1716,6 @@ function MainScreen() {
           : item,
         ),
     );
-    setExpandedItemId((current) => (current === itemId ? null : current));
   };
 
   const cycleItemCategory = (itemId: string) => {
@@ -1137,7 +1749,6 @@ function MainScreen() {
     setItems((current) => current.filter((item) => item.id !== itemId));
     if (editingItemId === itemId) setEditingItemId(null);
     if (editingGridItemId === itemId) setEditingGridItemId(null);
-    if (expandedItemId === itemId) setExpandedItemId(null);
     if (openCategoryMenuItemId === itemId) setOpenCategoryMenuItemId(null);
   };
 
@@ -1193,10 +1804,6 @@ function MainScreen() {
     );
     setEditingItemId(null);
     setEditingTitle("");
-  };
-
-  const toggleOriginalForItem = (itemId: string) => {
-    setExpandedItemId((current) => (current === itemId ? null : itemId));
   };
 
   const beginGridEditItem = (item: TodoItem) => {
@@ -1314,7 +1921,7 @@ function MainScreen() {
         addsPunctuation: true,
         requiresOnDeviceRecognition: prefersOnDeviceRecognition,
         iosTaskHint: target === "query" ? "search" : "dictation",
-        contextualStrings: ["清单", "购物", "工作", "关系", "生活", "旅行", "提醒", "今天"],
+        contextualStrings: ["清单", "购物", "工作", "关系", "生活", "旅行", "待整理", "提醒", "今天"],
       });
     } catch (error) {
       activeVoiceInputTargetRef.current = null;
@@ -1347,9 +1954,11 @@ function MainScreen() {
     setVoiceDraft("");
     setHasComposerTranscription(false);
     setComposerCategoryChoice("list");
-    setIsComposerCategoryMenuOpen(false);
-    setSelectedDueDate(new Date());
-    setIsDueDatePickerOpen(false);
+    setSelectedDueDate(startOfDay(new Date()));
+    setComposerPriority("normal");
+    setComposerReminder("off");
+    setIsManualComposerOptionsVisible(false);
+    setIsManualComposerAdvancedOpen(false);
     setVoiceComposerState("idle");
     setVoiceHint(defaultVoiceHint("capture"));
     setIsVoiceComposerOpen(true);
@@ -1359,22 +1968,161 @@ function MainScreen() {
     const normalized = voiceDraft.trim();
     if (!normalized) return;
 
-    const selectedCategory = composerCategoryChoice === "list" ? null : composerCategoryChoice;
-    setIsComposerCategoryMenuOpen(false);
-    setIsDueDatePickerOpen(false);
+    const forcedCategory = composerCategoryChoice === "list" ? null : composerCategoryChoice;
+    const metaSummary = buildComposerMetaSummary(composerPriority, composerReminder);
 
     if (!hasComposerTranscription) {
-      createConfirmedItemFromInput(normalized, selectedCategory);
+      createConfirmedItemFromInput(normalized, {
+        forcedCategory,
+        dueDate: selectedDueDate,
+        metaSummary,
+      });
       resetDockComposer();
       return;
     }
 
-    const dueDateNote = isSameDay(selectedDueDate, new Date())
-      ? ""
-      : `（计划日期：${selectedDueDate.toISOString().slice(0, 10)}）`;
-    const payload = dueDateNote.length > 0 ? `${normalized} ${dueDateNote}` : normalized;
-    void organizeTranscript(payload, selectedCategory);
+    void organizeTranscript(normalized, {
+      forcedCategory,
+      dueDate: selectedDueDate,
+      metadataNote: metaSummary,
+    });
     resetDockComposer();
+  };
+
+  const createAssistantCapture = (transcript: string): CaptureRecord => {
+    return {
+      id: makeId("capture"),
+      transcript,
+      createdAt: new Date().toISOString(),
+    };
+  };
+
+  const submitAssistantPrompt = async (input: string = voiceDraft) => {
+    const normalized = input.trim();
+    if (
+      !normalized ||
+      isComposerVoiceProcessing ||
+      isComposerRecording ||
+      isAssistantResponding
+    ) {
+      return;
+    }
+
+    const userMessage: AssistantMessage = {
+      id: makeId("assistant"),
+      role: "user",
+      text: normalized,
+      tone: "default",
+    };
+    const conversationHistory = assistantMessages
+      .slice(-10)
+      .map((message) => ({ role: message.role, text: message.text }));
+    const capture = createAssistantCapture(normalized);
+
+    setAssistantMessages((current) => [...current, userMessage]);
+    setAskResult("");
+    voiceDraftRef.current = "";
+    setVoiceDraft("");
+    setHasComposerTranscription(false);
+    setVoiceHint(defaultVoiceHint("ask"));
+    setQuery("");
+
+    setIsAssistantResponding(true);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/assistant`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: normalized,
+          nowISO8601: capture.createdAt,
+          history: conversationHistory,
+          tasks: listItems.slice(0, 40).map((item) => ({
+            id: item.id,
+            title: item.title,
+            category: item.category,
+            certainty: item.certainty,
+            dueDateKey: item.dueDateKey ?? null,
+            sourceSnippet: item.sourceSnippet,
+            reasoning: item.reasoning,
+            createdAt: item.createdAt,
+          })),
+          captures: captures.slice(0, 12).map((entry) => ({
+            id: entry.id,
+            transcript: entry.transcript,
+            createdAt: entry.createdAt,
+          })),
+        }),
+      });
+
+      const payload = (await response.json()) as AssistantApiResponse;
+      if (!response.ok || payload.error || typeof payload.reply !== "string") {
+        throw new Error(payload.detail || payload.error || "assistant_failed");
+      }
+      const replyText = payload.reply.trim();
+      let assistantTaskEntries: AssistantTaskEntry[] | undefined;
+
+      if (Array.isArray(payload.tasks) && payload.tasks.length > 0) {
+        if (payload.intent === "search_tasks") {
+          const matchedItems = matchAssistantTasksToExistingItems(payload.tasks, listItems);
+          if (matchedItems.length > 0) {
+            assistantTaskEntries = buildAssistantTaskEntriesFromItems(matchedItems);
+          }
+        } else {
+          assistantTaskEntries = payload.tasks.map((task) =>
+            buildAssistantTaskEntryFromApi(task, normalized),
+          );
+        }
+      }
+
+      setAssistantMessages((current) => [
+        ...current,
+        {
+          id: makeId("assistant"),
+          role: "assistant",
+          text:
+            assistantTaskEntries && assistantTaskEntries.length > 0
+              ? assistantTaskEntries.map((task) => formatAssistantTaskLine(task)).join("\n")
+              : replyText || "待整理 原话记录",
+          tone: toneForAssistantIntent(payload.intent),
+          taskListTitle:
+            assistantTaskEntries && assistantTaskEntries.length > 0
+              ? assistantTaskListTitle(payload.intent)
+              : undefined,
+          tasks: assistantTaskEntries,
+        },
+      ]);
+    } catch (_error) {
+      if (shouldCreateTasksLocally(normalized)) {
+        const fallbackItems = inferLocalTasks(
+          normalized,
+          capture.id,
+          capture.createdAt,
+          dueDateKeyFromDate(new Date()),
+        );
+        const fallbackEntries = fallbackItems.map((item) => ({
+          category: item.category,
+          title: item.title,
+          sourceSnippet: item.sourceSnippet,
+        }));
+        setAssistantMessages((current) => [
+          ...current,
+          {
+            id: makeId("assistant"),
+            role: "assistant",
+            text: fallbackEntries.map((task) => formatAssistantTaskLine(task)).join("\n"),
+            tone: "default",
+            taskListTitle: "发布任务",
+            tasks: fallbackEntries,
+          },
+        ]);
+      } else {
+        const fallbackMessage = answerAssistantPrompt(normalized);
+        setAssistantMessages((current) => [...current, fallbackMessage]);
+      }
+    } finally {
+      setIsAssistantResponding(false);
+    }
   };
 
   const startVoiceComposer = (target: VoiceComposerTarget = "capture") => {
@@ -1382,10 +2130,12 @@ function MainScreen() {
     setVoiceDraft("");
     setHasComposerTranscription(false);
     setComposerCategoryChoice("list");
-    setIsComposerCategoryMenuOpen(false);
+    setSelectedDueDate(startOfDay(new Date()));
+    setComposerPriority("normal");
+    setComposerReminder("off");
+    setIsManualComposerOptionsVisible(false);
+    setIsManualComposerAdvancedOpen(false);
     setVoiceComposerTarget(target);
-    setSelectedDueDate(new Date());
-    setIsDueDatePickerOpen(false);
     setVoiceComposerState("idle");
     setVoiceHint(defaultVoiceHint(target));
     setIsVoiceComposerOpen(true);
@@ -1415,71 +2165,139 @@ function MainScreen() {
     };
   }, []);
 
-  const renderInbox = () => (
-    <>
-      <View style={styles.queryBox}>
-        <TextInput
-          value={query}
-          onChangeText={setQuery}
-          placeholder="我是不是忘了买什么？"
-          placeholderTextColor={palette.inkSoft}
-          style={styles.queryInput}
-        />
-        <Pressable
-          style={[styles.askButton, isQueryVoiceProcessing ? styles.askButtonDisabled : null]}
-          disabled={isQueryVoiceProcessing}
-          onPress={() => {
-            if (isQueryRecording) {
-              stopNativeRecording(true);
-              return;
-            }
+  const renderTrackedItem = (item: TodoItem) => {
+    const isEditing = editingItemId === item.id;
+    const isCategoryMenuOpen = openCategoryMenuItemId === item.id;
+    const sourceCapture = capturesById[item.sourceCaptureId];
+    const originalText = sourceCapture?.transcript ?? item.sourceSnippet;
 
-            void startNativeRecording("query");
-          }}
-        >
-          {isQueryVoiceProcessing ? (
-            <Text style={styles.askButtonText}>...</Text>
-          ) : isQueryRecording ? (
-            <MaterialCommunityIcons name="stop" size={20} color={palette.accent} />
-          ) : (
-            <MaterialCommunityIcons
-              name="microphone-outline"
-              size={22}
-              color={palette.accent}
-            />
-          )}
-        </Pressable>
+    return (
+      <View
+        key={item.id}
+        style={[
+          styles.listItemCard,
+          styles.listItemCardForeground,
+          { opacity: itemOpacity(item.certainty) },
+        ]}
+      >
         <Pressable
-          style={[
-            styles.searchButton,
-            query.trim().length === 0 ? styles.askButtonDisabled : null,
-          ]}
-          disabled={query.trim().length === 0}
+          style={styles.listItemPressable}
           onPress={() => {
-            runRecall();
+            if (isEditing) return;
+            beginEditItem(item);
           }}
         >
-          <MaterialCommunityIcons
-            name="magnify-plus-outline"
-            size={20}
-            color={palette.inkSoft}
-          />
+          <View style={styles.listItemTop}>
+            <View style={styles.listItemTextWrap}>
+              <View style={styles.listItemTitleRow}>
+                <Pressable
+                  style={styles.listCategoryButton}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    setOpenCategoryMenuItemId((current) =>
+                      current === item.id ? null : item.id,
+                    );
+                  }}
+                >
+                  <Text style={styles.listCategoryText}>{categoryTitle(item.category)}</Text>
+                </Pressable>
+                {isEditing ? (
+                  <TextInput
+                    value={editingTitle}
+                    onChangeText={setEditingTitle}
+                    autoFocus
+                    onSubmitEditing={finishListEditing}
+                    onBlur={finishListEditing}
+                    placeholder="修改事项标题"
+                    placeholderTextColor={palette.inkSoft}
+                    style={styles.listInlineInput}
+                  />
+                ) : (
+                  <Text style={styles.listItemTitle}>{item.title}</Text>
+                )}
+                {isCategoryMenuOpen ? (
+                  <View style={styles.categoryDropdownMenu}>
+                    {(["shopping", "work", "relationships", "life", "travel", "triage"] as Category[]).map(
+                      (category) => {
+                        const active = item.category === category;
+
+                        return (
+                          <Pressable
+                            key={category}
+                            style={[
+                              styles.categoryDropdownOption,
+                              active ? styles.categoryDropdownOptionActive : null,
+                            ]}
+                            onPress={(event) => {
+                              event.stopPropagation();
+                              setItemCategory(item.id, category);
+                            }}
+                          >
+                            <Text
+                              style={styles.categoryDropdownOptionText}
+                            >
+                              {categoryTitle(category)}
+                            </Text>
+                          </Pressable>
+                        );
+                      },
+                    )}
+                  </View>
+                ) : null}
+              </View>
+              <Text numberOfLines={2} style={styles.listItemOriginalText}>
+                {`原话:${originalText}`}
+              </Text>
+            </View>
+
+            <View style={styles.listActions}>
+              <Pressable style={styles.iconActionButton} onPress={() => beginEditItem(item)}>
+                <MaterialCommunityIcons
+                  name="pencil-outline"
+                  size={18}
+                  color={palette.accent}
+                />
+              </Pressable>
+              <Pressable
+                style={[styles.iconActionButton, styles.iconDeleteButton]}
+                onPress={() => deleteItem(item.id)}
+              >
+                <MaterialCommunityIcons name="close" size={20} color="#8C4325" />
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.iconActionButton,
+                  styles.iconConfirmButton,
+                  item.certainty === "confirmed" ? styles.iconConfirmButtonDone : null,
+                ]}
+                disabled={item.certainty === "confirmed"}
+                onPress={() => confirmItem(item.id)}
+              >
+                <MaterialCommunityIcons
+                  name="check"
+                  size={20}
+                  color={item.certainty === "confirmed" ? palette.inkSoft : palette.accent}
+                />
+              </Pressable>
+            </View>
+          </View>
         </Pressable>
       </View>
+    );
+  };
 
-      {askResult.length > 0 ? (
-        <View style={styles.resultBox}>
-          <Text style={styles.resultText}>{askResult}</Text>
-        </View>
-      ) : null}
-
+  const renderInbox = () => (
+    <View style={styles.homeScreen}>
       <View style={styles.grid}>
         {clusterOrder.map((cluster) => (
           <View
             key={cluster.key}
             style={[
               styles.gridCard,
-              cluster.key === "travel" ? styles.gridCardWide : null,
+              clusterOrder.length % 2 === 1 &&
+              cluster.key === clusterOrder[clusterOrder.length - 1]?.key
+                ? styles.gridCardWide
+                : null,
               { backgroundColor: cluster.panelColor, borderColor: palette.border },
             ]}
           >
@@ -1497,51 +2315,131 @@ function MainScreen() {
                 AI 还没放任务到这里
               </Text>
             ) : (
-              grouped[cluster.key].slice(0, 2).map((it) => (
-                <Swipeable
-                  key={it.id}
-                  overshootRight={false}
-                  renderRightActions={() => (
-                    <Pressable
-                      style={styles.gridDeleteAction}
-                      onPress={() => deleteItem(it.id)}
-                    >
-                      <Text style={styles.gridDeleteActionText}>删除</Text>
-                    </Pressable>
-                  )}
+              <View style={styles.gridCardBody}>
+                <ScrollView
+                  style={styles.gridCardScroll}
+                  contentContainerStyle={styles.gridCardScrollContent}
+                  showsVerticalScrollIndicator
+                  nestedScrollEnabled
+                  keyboardShouldPersistTaps="handled"
                 >
-                  <Pressable
-                    style={[
-                      styles.todoRow,
-                      { borderBottomColor: cluster.mutedInkColor },
-                      { opacity: itemOpacity(it.certainty) },
-                    ]}
-                    onPress={() => beginGridEditItem(it)}
-                  >
-                    {editingGridItemId === it.id ? (
-                      <TextInput
-                        value={editingGridTitle}
-                        onChangeText={setEditingGridTitle}
-                        autoFocus
-                        onSubmitEditing={() => saveGridEditItem(it.id)}
-                        onBlur={() => saveGridEditItem(it.id)}
-                        placeholder="修改事项"
-                        placeholderTextColor={cluster.mutedInkColor}
-                        style={[styles.todoEditInput, { color: cluster.rowInkColor }]}
-                      />
-                    ) : (
-                      <Text style={[styles.todoText, { color: cluster.rowInkColor }]}>
-                        {it.title}
-                      </Text>
-                    )}
-                  </Pressable>
-                </Swipeable>
-              ))
+                  {grouped[cluster.key].map((it) => (
+                    <Swipeable
+                      key={it.id}
+                      overshootRight={false}
+                      renderRightActions={() => (
+                        <Pressable
+                          style={styles.gridDeleteAction}
+                          onPress={() => deleteItem(it.id)}
+                        >
+                          <Text style={styles.gridDeleteActionText}>删除</Text>
+                        </Pressable>
+                      )}
+                    >
+                      <Pressable
+                        style={[
+                          styles.todoRow,
+                          { borderBottomColor: cluster.mutedInkColor },
+                          { opacity: itemOpacity(it.certainty) },
+                        ]}
+                        onPress={() => beginGridEditItem(it)}
+                      >
+                        {editingGridItemId === it.id ? (
+                          <TextInput
+                            value={editingGridTitle}
+                            onChangeText={setEditingGridTitle}
+                            autoFocus
+                            onSubmitEditing={() => saveGridEditItem(it.id)}
+                            onBlur={() => saveGridEditItem(it.id)}
+                            placeholder="修改事项"
+                            placeholderTextColor={cluster.mutedInkColor}
+                            style={[styles.todoEditInput, { color: cluster.rowInkColor }]}
+                          />
+                        ) : (
+                          <Text style={[styles.todoText, { color: cluster.rowInkColor }]}>
+                            {it.title}
+                          </Text>
+                        )}
+                      </Pressable>
+                    </Swipeable>
+                  ))}
+                </ScrollView>
+              </View>
             )}
           </View>
         ))}
       </View>
-    </>
+
+      {importantItems.length > 0 ? (
+        <View style={styles.homeFocusBlock}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>重要事项</Text>
+            <Pressable onPress={() => setActiveTab("assistant")}>
+              <Text style={styles.sectionActionText}>去问助理</Text>
+            </Pressable>
+          </View>
+          {importantItems.map((item) => (
+            <Pressable
+              key={item.id}
+              style={styles.homeFocusRow}
+              onPress={() => setActiveTab("list")}
+            >
+              <Text style={styles.homeFocusCategory}>{categoryTitle(item.category)}</Text>
+              <Text style={styles.homeFocusText}>{item.title}</Text>
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+
+  const renderAssistant = () => (
+    <View style={styles.assistantScreen}>
+      <View style={styles.assistantFeed}>
+        {assistantMessages.map((message) => (
+          <View
+            key={message.id}
+            style={[
+              styles.assistantMessageRow,
+              message.role === "user" ? styles.assistantMessageRowUser : null,
+            ]}
+          >
+            {message.role === "assistant" && message.tasks && message.tasks.length > 0 ? (
+              <View style={styles.assistantTaskList}>
+                {message.taskListTitle ? (
+                  <Text style={styles.assistantTaskListLabel}>{message.taskListTitle}</Text>
+                ) : null}
+                {message.tasks.map((task, index) => {
+                  return (
+                    <View key={`${message.id}-${index}`} style={styles.assistantTaskRow}>
+                      <View style={styles.assistantTaskBody}>
+                        <Text style={styles.assistantTaskTitle}>{formatAssistantTaskLine(task)}</Text>
+                        <Text style={styles.assistantTaskMeta}>原话: {task.sourceSnippet}</Text>
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            ) : (
+              <Text
+                style={[
+                  styles.assistantMessageText,
+                  message.role === "user" ? styles.assistantMessageTextUser : null,
+                  message.tone === "plan" ? styles.assistantMessageTextPlan : null,
+                ]}
+              >
+                {message.text}
+              </Text>
+            )}
+          </View>
+        ))}
+        {isAssistantResponding ? (
+          <View style={styles.assistantMessageRow}>
+            <Text style={styles.assistantMessageText}>...</Text>
+          </View>
+        ) : null}
+      </View>
+    </View>
   );
 
   const renderList = () => (
@@ -1555,245 +2453,230 @@ function MainScreen() {
           }}
         />
       ) : null}
+
+      <View style={styles.historyHeader}>
+        <Text style={styles.sectionTitle}>所有</Text>
+        {/* Keep this explanation visible on the list screen so users know original wording is preserved. */}
+        <Text style={styles.historyHeaderText}>{listScreenDescription}</Text>
+      </View>
+
       {listItems.length === 0 ? (
         <View style={styles.simplePanel}>
-          <Text style={styles.title}>清单是空的</Text>
-          <Text style={styles.simpleItem}>点加号说一句，系统会保存原话并自动整理事项。</Text>
+          <Text style={styles.title}>还没有记录</Text>
+          <Text style={styles.simpleItem}>点底部输入框说一句，系统会保存原话并自动整理事项。</Text>
         </View>
       ) : (
-        listItems.map((item) => {
-          const isEditing = editingItemId === item.id;
-          const isExpanded = expandedItemId === item.id;
-          const isCategoryMenuOpen = openCategoryMenuItemId === item.id;
-          const shouldShowOriginal = item.certainty !== "confirmed" || isExpanded;
-          const sourceCapture = capturesById[item.sourceCaptureId];
-          const chipAppearance = categoryChipAppearance(item.category);
-
-          return (
-            <View
-              key={item.id}
-              style={[styles.listItemCard, styles.listItemCardForeground, { opacity: itemOpacity(item.certainty) }]}
-            >
-              <Pressable
-                style={styles.listItemPressable}
-                onPress={() => {
-                  if (isEditing) {
-                    return;
-                  }
-
-                  if (item.certainty === "confirmed" && expandedItemId === item.id) {
-                    toggleOriginalForItem(item.id);
-                    return;
-                  }
-
-                  beginEditItem(item);
-                }}
-              >
-                <View style={styles.listItemTop}>
-                  <View
-                    style={[
-                      styles.listItemStatusMark,
-                      { borderColor: chipAppearance.textColor },
-                      item.certainty === "confirmed" ? styles.listItemStatusMarkConfirmed : null,
-                    ]}
-                  />
-                  <View style={styles.listItemTextWrap}>
-                    <View style={styles.listItemTitleRow}>
-                      <Pressable
-                        style={styles.categoryChipButton}
-                        onPress={(event) => {
-                          event.stopPropagation();
-                          setOpenCategoryMenuItemId((current) => (current === item.id ? null : item.id));
-                        }}
-                      >
-                        <Text
-                          style={[
-                            styles.categoryChipButtonText,
-                            { color: chipAppearance.textColor },
-                          ]}
-                        >
-                          {categoryTitle(item.category)}
-                        </Text>
-                        <MaterialCommunityIcons
-                          name={isCategoryMenuOpen ? "chevron-up" : "chevron-down"}
-                          size={14}
-                          color={chipAppearance.textColor}
-                        />
-                      </Pressable>
-                      {isCategoryMenuOpen ? (
-                        <View style={styles.categoryDropdownMenu}>
-                          {(["shopping", "work", "relationships", "life", "travel"] as Category[]).map((category) => {
-                            const appearance = categoryChipAppearance(category);
-                            const active = item.category === category;
-
-                            return (
-                              <Pressable
-                                key={category}
-                                style={[
-                                  styles.categoryDropdownOption,
-                                  active ? styles.categoryDropdownOptionActive : null,
-                                ]}
-                                onPress={(event) => {
-                                  event.stopPropagation();
-                                  setItemCategory(item.id, category);
-                                }}
-                              >
-                                <Text
-                                  style={[
-                                    styles.categoryDropdownOptionText,
-                                    { color: appearance.textColor },
-                                  ]}
-                                >
-                                  {categoryTitle(category)}
-                                </Text>
-                              </Pressable>
-                            );
-                          })}
-                        </View>
-                      ) : null}
-                    </View>
-                    {isEditing ? (
-                      <TextInput
-                        value={editingTitle}
-                        onChangeText={setEditingTitle}
-                        autoFocus
-                        onSubmitEditing={finishListEditing}
-                        onBlur={finishListEditing}
-                        placeholder="修改事项标题"
-                        placeholderTextColor={palette.inkSoft}
-                        style={styles.listInlineInput}
-                      />
-                    ) : (
-                      <Text style={styles.listItemTitle}>{item.title}</Text>
-                    )}
-                    {shouldShowOriginal ? (
-                      <Text style={styles.detailText}>{sourceCapture?.transcript ?? "暂无原话"}</Text>
-                    ) : null}
-                  </View>
-                  <View style={styles.listActions}>
-                    <Pressable style={styles.iconActionButton} onPress={() => beginEditItem(item)}>
-                      <MaterialCommunityIcons
-                        name="pencil-outline"
-                        size={18}
-                        color={palette.accent}
-                      />
-                    </Pressable>
-                    <Pressable
-                      style={[styles.iconActionButton, styles.iconDeleteButton]}
-                      onPress={() => deleteItem(item.id)}
-                    >
-                      <MaterialCommunityIcons
-                        name="close"
-                        size={20}
-                        color="#8C4325"
-                      />
-                    </Pressable>
-                    <Pressable
-                      style={[
-                        styles.iconActionButton,
-                        styles.iconConfirmButton,
-                        item.certainty === "confirmed" ? styles.iconConfirmButtonDone : null,
-                      ]}
-                      disabled={item.certainty === "confirmed"}
-                      onPress={() => confirmItem(item.id)}
-                    >
-                      <MaterialCommunityIcons
-                        name="check"
-                        size={20}
-                        color={item.certainty === "confirmed" ? palette.inkSoft : palette.accent}
-                      />
-                    </Pressable>
-                  </View>
-                </View>
-              </Pressable>
-            </View>
-          );
-        })
+        listItems.map((item) => renderTrackedItem(item))
       )}
     </View>
   );
 
-  const renderToday = () => {
-    const todayKey = dueDateKeyFromDate(new Date());
-    const todayItems = items.filter(
-      (item) => item.certainty !== "suggestion" && item.dueDateKey === todayKey,
-    );
+  const renderToday = () => (
+    <View style={styles.todayScreen}>
+      {todayItems.length === 0 ? (
+        <Text style={styles.todayEmptyText}>今天还没有待办事项。</Text>
+      ) : (
+        <View style={styles.todayList}>
+          {todayItems.map((it) => {
+            const isEditing = editingItemId === it.id;
 
-    return (
-      <View style={styles.todayScreen}>
-        {todayItems.length === 0 ? (
-          <Text style={styles.todayEmptyText}>今天还没有待办事项。</Text>
-        ) : (
-          <View style={styles.todayList}>
-            {todayItems.map((it) => {
-              const isEditing = editingItemId === it.id;
+            return (
+              <View key={it.id} style={styles.todayRow}>
+                <View style={styles.todayRowMain}>
+                  <View style={styles.todayRowMarker} />
+                  {isEditing ? (
+                    <TextInput
+                      value={editingTitle}
+                      onChangeText={setEditingTitle}
+                      placeholder="修改今天事项"
+                      placeholderTextColor={palette.inkSoft}
+                      onSubmitEditing={() => saveEditItem(it.id)}
+                      onBlur={() => saveEditItem(it.id)}
+                      style={styles.todayEditInput}
+                    />
+                  ) : (
+                    <Text style={styles.todayRowTitle}>{it.title}</Text>
+                  )}
+                </View>
+                <View style={styles.todayRowActions}>
+                  <Pressable
+                    style={styles.todayActionButton}
+                    onPress={() => {
+                      if (isEditing) {
+                        saveEditItem(it.id);
+                        return;
+                      }
+                      beginEditItem(it);
+                    }}
+                  >
+                    <MaterialCommunityIcons
+                      name={isEditing ? "check" : "pencil-outline"}
+                      size={18}
+                      color={palette.accent}
+                    />
+                  </Pressable>
+                  <Pressable
+                    style={[styles.todayActionButton, styles.todayDeleteButton]}
+                    onPress={() => deleteItem(it.id)}
+                  >
+                    <MaterialCommunityIcons name="close" size={20} color="#8C4325" />
+                  </Pressable>
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      )}
+    </View>
+  );
+
+  const renderPlan = () => (
+    <View style={styles.calendarScreen}>
+      <View style={styles.planCalendarWrap}>
+        <View style={styles.planCalendarHeader}>
+          <Pressable
+            hitSlop={8}
+            style={styles.planCalendarNavButton}
+            onPress={() => shiftPlanCalendarMonth(-1)}
+          >
+            <MaterialCommunityIcons name="chevron-left" size={18} color={palette.accent} />
+          </Pressable>
+          <Text style={styles.planCalendarHeaderText}>{formatMonthLabel(planCalendarMonth)}</Text>
+          <Pressable
+            hitSlop={8}
+            style={styles.planCalendarNavButton}
+            onPress={() => shiftPlanCalendarMonth(1)}
+          >
+            <MaterialCommunityIcons name="chevron-right" size={18} color={palette.accent} />
+          </Pressable>
+        </View>
+
+        <View style={styles.planCalendarWeekRow}>
+          {calendarWeekdayLabels.map((label) => (
+            <Text key={label} style={styles.planCalendarWeekLabel}>
+              {label}
+            </Text>
+          ))}
+        </View>
+
+        <View style={styles.planCalendarGrid}>
+          {planCalendarDays.map((dateOption, index) => {
+            if (!dateOption) {
+              return <View key={`plan-empty-${index}`} style={styles.planCalendarDayPlaceholder} />;
+            }
+
+            const dateKey = dueDateKeyFromDate(dateOption);
+            const hasItems = Boolean(scheduledItemsByDateKey[dateKey]?.length);
+            const active = isSameDay(dateOption, planSelectedDate);
+            const isToday = isSameDay(dateOption, new Date());
+
+            return (
+              <Pressable
+                key={dateOption.toISOString()}
+                style={[styles.planCalendarDayButton, active ? styles.planCalendarDayButtonActive : null]}
+                onPress={() => selectPlanDate(dateOption)}
+              >
+                <Text
+                  style={[
+                    styles.planCalendarDayText,
+                    isToday ? styles.planCalendarDayTextToday : null,
+                    active ? styles.planCalendarDayTextActive : null,
+                  ]}
+                >
+                  {dateOption.getDate()}
+                </Text>
+                <View style={styles.planCalendarDayMarkerSlot}>
+                  {hasItems ? (
+                    <MaterialCommunityIcons
+                      name="checkbox-blank-circle"
+                      size={7}
+                      color={active ? "#F3E7D8" : palette.accent}
+                    />
+                  ) : null}
+                </View>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+
+      <View style={styles.planAgendaSection}>
+        <View style={styles.planAgendaHeader}>
+          <Text style={styles.planAgendaHeaderText}>
+            {`${formatCompactDateCode(planSelectedDate)} ${fullWeekdayLabels[planSelectedDate.getDay()]}`}
+          </Text>
+          <Pressable
+            hitSlop={8}
+            style={styles.planAgendaAddButton}
+            onPress={() => {
+              setIsPlanQuickAddOpen((current) => !current);
+              setPlanQuickAddTitle("");
+            }}
+          >
+            <MaterialCommunityIcons
+              name={isPlanQuickAddOpen ? "close" : "plus"}
+              size={20}
+              color={palette.accent}
+            />
+          </Pressable>
+        </View>
+
+        {isPlanQuickAddOpen ? (
+          <View style={styles.planQuickAddRow}>
+            <TextInput
+              value={planQuickAddTitle}
+              onChangeText={setPlanQuickAddTitle}
+              autoFocus
+              onSubmitEditing={submitPlanQuickAdd}
+              placeholder="添加这一天的事项"
+              placeholderTextColor={palette.inkSoft}
+              returnKeyType="done"
+              style={styles.planQuickAddInput}
+            />
+            <Pressable
+              style={[
+                styles.planQuickAddSubmitButton,
+                planQuickAddTitle.trim().length > 0 ? styles.planQuickAddSubmitButtonActive : null,
+              ]}
+              disabled={planQuickAddTitle.trim().length === 0}
+              onPress={submitPlanQuickAdd}
+            >
+              <MaterialCommunityIcons
+                name="check"
+                size={18}
+                color={planQuickAddTitle.trim().length > 0 ? "#F3E7D8" : palette.inkSoft}
+              />
+            </Pressable>
+          </View>
+        ) : null}
+
+        <View style={styles.planAgendaList}>
+          {planSelectedItems.length > 0 ? (
+            planSelectedItems.map((item) => {
+              const chip = categoryChipAppearance(item.category);
 
               return (
-                <View key={it.id} style={styles.todayRow}>
-                  <View style={styles.todayRowMain}>
-                    <View style={styles.todayRowMarker} />
-                    {isEditing ? (
-                      <TextInput
-                        value={editingTitle}
-                        onChangeText={setEditingTitle}
-                        placeholder="修改今天事项"
-                        placeholderTextColor={palette.inkSoft}
-                        onSubmitEditing={() => saveEditItem(it.id)}
-                        onBlur={() => saveEditItem(it.id)}
-                        style={styles.todayEditInput}
-                      />
-                    ) : (
-                      <Text style={styles.todayRowTitle}>{it.title}</Text>
-                    )}
-                  </View>
-                  <View style={styles.todayRowActions}>
-                    <Pressable
-                      style={styles.todayActionButton}
-                      onPress={() => {
-                        if (isEditing) {
-                          saveEditItem(it.id);
-                          return;
-                        }
-                        beginEditItem(it);
-                      }}
-                    >
-                      <MaterialCommunityIcons
-                        name={isEditing ? "check" : "pencil-outline"}
-                        size={18}
-                        color={palette.accent}
-                      />
-                    </Pressable>
-                    <Pressable
-                      style={[styles.todayActionButton, styles.todayDeleteButton]}
-                      onPress={() => deleteItem(it.id)}
-                    >
-                      <MaterialCommunityIcons
-                        name="close"
-                        size={20}
-                        color="#8C4325"
-                      />
-                    </Pressable>
+                <View key={item.id} style={styles.planAgendaRow}>
+                  <View style={[styles.planAgendaRowMarker, { backgroundColor: chip.backgroundColor }]} />
+                  <View style={styles.planAgendaRowBody}>
+                    <Text style={styles.planAgendaTitle}>{item.title}</Text>
                   </View>
                 </View>
               );
-            })}
-          </View>
-        )}
+            })
+          ) : (
+            <Text style={styles.planAgendaEmptyText}>选中的这一天还没有安排，换一天看看也可以。</Text>
+          )}
+        </View>
       </View>
-    );
-  };
-
-  const renderPlan = () => (
-    <View style={styles.simplePanel}>
-      <Text style={styles.title}>日历计划</Text>
-      <Text style={styles.simpleItem}>这里接日历视图（下一步可接 react-native-calendars）</Text>
     </View>
   );
 
   const renderSettings = () => (
     <View style={styles.simplePanel}>
       <Text style={styles.title}>设置</Text>
-      <Text style={styles.simpleItem}>当前架构: Expo + TypeScript + Node TypeScript</Text>
+      <Text style={styles.simpleItem}>当前语音输入: 苹果原生转录</Text>
+      <Text style={styles.simpleItem}>当前整理链路: 本地规则 + 可选后端 organize</Text>
       <Text style={styles.simpleItem}>后端地址: http://127.0.0.1:8787</Text>
     </View>
   );
@@ -1802,17 +2685,19 @@ function MainScreen() {
     <SafeAreaView style={styles.screen} edges={["top", "bottom"]}>
       <StatusBar style="dark" />
       <View style={styles.topNav}>
-        {(["inbox", "list", "today", "plan", "settings"] as Tab[]).map((tab) => (
-          <Pressable
-            key={tab}
-            onPress={() => setActiveTab(tab)}
-            style={[styles.navItem, activeTab === tab ? styles.navItemActive : null]}
-          >
-            <Text style={[styles.navText, activeTab === tab ? styles.navTextActive : null]}>
-              {tabLabel[tab]}
-            </Text>
-          </Pressable>
-        ))}
+        <View style={styles.topNavTabs}>
+          {navTabs.map((tab) => (
+            <Pressable
+              key={tab}
+              onPress={() => setActiveTab(tab)}
+              style={[styles.navItem, activeTab === tab ? styles.navItemActive : null]}
+            >
+              <Text style={[styles.navText, activeTab === tab ? styles.navTextActive : null]}>
+                {tabLabel[tab]}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
       </View>
 
       <ScrollView
@@ -1827,21 +2712,12 @@ function MainScreen() {
         showsVerticalScrollIndicator={false}
       >
         {activeTab === "inbox" && renderInbox()}
+        {activeTab === "assistant" && renderAssistant()}
         {activeTab === "list" && renderList()}
         {activeTab === "today" && renderToday()}
         {activeTab === "plan" && renderPlan()}
         {activeTab === "settings" && renderSettings()}
       </ScrollView>
-
-      {(isDueDatePickerOpen || isComposerCategoryMenuOpen) ? (
-        <Pressable
-          style={styles.voiceComposerBackdrop}
-          onPress={() => {
-            setIsComposerCategoryMenuOpen(false);
-            setIsDueDatePickerOpen(false);
-          }}
-        />
-      ) : null}
 
       <View
         style={[
@@ -1851,114 +2727,63 @@ function MainScreen() {
           },
         ]}
       >
-        <View style={styles.voiceComposerTopRow}>
-          <Pressable
-            hitSlop={8}
-            style={[
-              styles.voiceListPicker,
-              isComposerCategoryMenuOpen ? styles.voiceListPickerActive : null,
-            ]}
-            onPress={() => {
-              setIsComposerCategoryMenuOpen((current) => !current);
-            }}
-          >
-            <Text style={styles.voiceListPickerText}>{composerCategoryTitle(composerCategoryChoice)}</Text>
-            <MaterialCommunityIcons
-              name={isComposerCategoryMenuOpen ? "chevron-up" : "chevron-down"}
-              size={16}
-              color={palette.inkMuted}
-            />
-          </Pressable>
-          <Pressable
-            style={[
-              styles.voiceMetaChip,
-              styles.voiceMetaChipActive,
-            ]}
-            onPress={() => {
-              setCalendarMonth(startOfDay(selectedDueDate));
-              setIsDueDatePickerOpen((current) => !current);
-              setIsComposerCategoryMenuOpen(false);
-            }}
-          >
-            <Text style={styles.voiceMetaChipText}>{formatDueDateLabel(selectedDueDate)}</Text>
-          </Pressable>
-          <Pressable style={styles.voiceMetaChip}>
-            <Text style={styles.voiceMetaChipText}>附件</Text>
-          </Pressable>
-          <Pressable style={styles.voiceMetaChip}>
-            <Text style={styles.voiceMetaChipText}>优先级</Text>
-          </Pressable>
-          <Pressable style={styles.voiceMetaChip}>
-            <Text style={styles.voiceMetaChipText}>提醒</Text>
-          </Pressable>
-        </View>
-
-        {isDueDatePickerOpen ? (
-          <View style={styles.calendarPanel}>
-            <View style={styles.calendarHeader}>
+        {!isAssistantTab && isManualComposerOptionsVisible ? (
+          <View style={styles.manualComposerOptions}>
+            <View style={styles.manualComposerRow}>
               <Pressable
-                style={styles.calendarNavButton}
-                onPress={() => {
-                  setCalendarMonth(
-                    (current) => new Date(current.getFullYear(), current.getMonth() - 1, 1),
-                  );
-                }}
-              >
-                <MaterialCommunityIcons name="chevron-left" size={20} color={palette.accent} />
-              </Pressable>
-              <Text style={styles.calendarHeaderText}>{formatMonthLabel(calendarMonth)}</Text>
-              <Pressable
-                style={styles.calendarNavButton}
-                onPress={() => {
-                  setCalendarMonth(
-                    (current) => new Date(current.getFullYear(), current.getMonth() + 1, 1),
-                  );
-                }}
-              >
-                <MaterialCommunityIcons name="chevron-right" size={20} color={palette.accent} />
-              </Pressable>
-            </View>
-
-            <View style={styles.calendarWeekRow}>
-              {calendarWeekdayLabels.map((label) => (
-                <Text key={label} style={styles.calendarWeekLabel}>
-                  {label}
-                </Text>
-              ))}
-            </View>
-
-            <View style={styles.calendarGrid}>
-              {calendarDays.map((dateOption, index) => {
-                if (!dateOption) {
-                  return <View key={`empty-${index}`} style={styles.calendarDayPlaceholder} />;
+                style={styles.manualComposerChip}
+                onPress={() =>
+                  setComposerCategoryChoice((current) => nextComposerCategoryChoice(current))
                 }
-
-                const active = isSameDay(dateOption, selectedDueDate);
-                const isToday = isSameDay(dateOption, new Date());
-
-                return (
-                  <Pressable
-                    key={dateOption.toISOString()}
-                    style={[styles.calendarDayButton, active ? styles.calendarDayButtonActive : null]}
-                    onPress={() => {
-                      setSelectedDueDate(dateOption);
-                      setCalendarMonth(new Date(dateOption.getFullYear(), dateOption.getMonth(), 1));
-                      setIsDueDatePickerOpen(false);
-                    }}
-                  >
-                    <Text
-                      style={[
-                        styles.calendarDayText,
-                        isToday ? styles.calendarDayTextToday : null,
-                        active ? styles.calendarDayTextActive : null,
-                      ]}
-                    >
-                      {dateOption.getDate()}
-                    </Text>
-                  </Pressable>
-                );
-              })}
+              >
+                <Text style={styles.manualComposerChipText}>
+                  {`清单 · ${
+                    composerCategoryChoice === "list"
+                      ? "自动"
+                      : categoryTitle(composerCategoryChoice)
+                  }`}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={styles.manualComposerChip}
+                onPress={() => setSelectedDueDate((current) => nextComposerDueDate(current))}
+              >
+                <Text style={styles.manualComposerChipText}>
+                  {`日期 · ${formatComposerDueDateLabel(selectedDueDate)}`}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.manualComposerChip,
+                  isManualComposerAdvancedOpen ? styles.manualComposerChipActive : null,
+                ]}
+                onPress={() => setIsManualComposerAdvancedOpen((current) => !current)}
+              >
+                <Text style={styles.manualComposerChipText}>
+                  {isManualComposerAdvancedOpen ? "收起" : "更多"}
+                </Text>
+              </Pressable>
             </View>
+            {isManualComposerAdvancedOpen ? (
+              <View style={styles.manualComposerRow}>
+                <Pressable
+                  style={styles.manualComposerChip}
+                  onPress={() => setComposerPriority((current) => nextComposerPriority(current))}
+                >
+                  <Text style={styles.manualComposerChipText}>
+                    {`优先级 · ${composerPriorityLabel[composerPriority]}`}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={styles.manualComposerChip}
+                  onPress={() => setComposerReminder((current) => nextComposerReminder(current))}
+                >
+                  <Text style={styles.manualComposerChipText}>
+                    {`提醒 · ${composerReminderLabel[composerReminder]}`}
+                  </Text>
+                </Pressable>
+              </View>
+            ) : null}
           </View>
         ) : null}
 
@@ -2003,28 +2828,52 @@ function MainScreen() {
                 voiceDraftRef.current = nextValue;
                 setVoiceDraft(nextValue);
               }}
-              placeholder={isComposerVoiceProcessing ? "正在转录..." : voiceComposerPlaceholder("capture")}
+              placeholder={
+                isComposerVoiceProcessing
+                  ? "正在转录..."
+                  : isAssistantTab
+                    ? "给助理发消息"
+                    : voiceComposerPlaceholder("capture")
+              }
               placeholderTextColor={palette.inkSoft}
               multiline
               editable={!isComposerVoiceProcessing}
               textAlignVertical="top"
+              onFocus={() => {
+                if (!isAssistantTab) {
+                  setIsManualComposerOptionsVisible(true);
+                }
+              }}
               style={styles.voiceComposerInput}
             />
             <Pressable
               style={[
                 styles.voiceInlineSendButton,
-                voiceDraft.trim().length > 0 && !isComposerRecording && !isComposerVoiceProcessing
+                voiceDraft.trim().length > 0 &&
+                !isComposerRecording &&
+                !isComposerVoiceProcessing &&
+                !isAssistantInputLocked
                   ? styles.voiceInlineSendButtonActive
                   : null,
               ]}
-              disabled={voiceDraft.trim().length === 0 || isComposerRecording || isComposerVoiceProcessing}
-              onPress={submitVoiceDraft}
+              disabled={
+                voiceDraft.trim().length === 0 ||
+                isComposerRecording ||
+                isComposerVoiceProcessing ||
+                isAssistantInputLocked
+              }
+              onPress={
+                isAssistantTab ? () => void submitAssistantPrompt() : submitVoiceDraft
+              }
             >
               <MaterialCommunityIcons
                 name="send"
                 size={16}
                 color={
-                  voiceDraft.trim().length > 0 && !isComposerRecording && !isComposerVoiceProcessing
+                  voiceDraft.trim().length > 0 &&
+                  !isComposerRecording &&
+                  !isComposerVoiceProcessing &&
+                  !isAssistantInputLocked
                     ? "#F3E7D8"
                     : palette.inkSoft
                 }
@@ -2036,9 +2885,11 @@ function MainScreen() {
             style={[
               styles.voiceRecordButton,
               isComposerRecording ? styles.voiceRecordButtonActive : null,
-              isComposerVoiceProcessing ? styles.askButtonDisabled : null,
+              isComposerVoiceProcessing || isAssistantInputLocked
+                ? styles.askButtonDisabled
+                : null,
             ]}
-            disabled={isComposerVoiceProcessing}
+            disabled={isComposerVoiceProcessing || isAssistantInputLocked}
             onPress={toggleComposerRecording}
           >
             <MaterialCommunityIcons
@@ -2048,42 +2899,6 @@ function MainScreen() {
             />
           </Pressable>
         </View>
-
-        {isComposerCategoryMenuOpen ? (
-          <View style={styles.voiceCategoryMenu}>
-            {(["list", "shopping", "work", "relationships", "life", "travel"] as ComposerCategoryChoice[]).map(
-              (choice) => {
-                const active = composerCategoryChoice === choice;
-                const appearance = choice === "list" ? null : categoryChipAppearance(choice);
-
-                return (
-                  <Pressable
-                    key={choice}
-                    style={[
-                      styles.voiceCategoryOption,
-                      active ? styles.voiceCategoryOptionActive : null,
-                    ]}
-                    onPress={() => {
-                      setComposerCategoryChoice(choice);
-                      setIsComposerCategoryMenuOpen(false);
-                    }}
-                  >
-                    <Text
-                      style={[
-                        styles.voiceCategoryOptionText,
-                        choice === "list"
-                          ? styles.voiceCategoryOptionTextList
-                          : { color: appearance?.textColor ?? palette.inkMuted },
-                      ]}
-                    >
-                      {composerCategoryTitle(choice)}
-                    </Text>
-                  </Pressable>
-                );
-              },
-            )}
-          </View>
-        ) : null}
       </View>
 
     </SafeAreaView>
@@ -2100,6 +2915,9 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     paddingHorizontal: 20,
+    gap: 18,
+  },
+  homeScreen: {
     gap: 18,
   },
   headerBlock: {
@@ -2169,6 +2987,22 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
   },
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  sectionTitle: {
+    color: palette.ink,
+    fontSize: 18,
+    fontWeight: "800",
+  },
+  sectionActionText: {
+    color: palette.accent,
+    fontSize: 13,
+    fontWeight: "700",
+  },
   grid: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -2177,11 +3011,13 @@ const styles = StyleSheet.create({
   },
   gridCard: {
     width: "48.5%",
-    minHeight: 180,
+    height: 196,
+    minHeight: 0,
     borderRadius: 24,
     borderWidth: 1,
     padding: 14,
     gap: 3,
+    overflow: "hidden",
   },
   gridCardWide: {
     width: "100%",
@@ -2211,6 +3047,20 @@ const styles = StyleSheet.create({
   },
   emptyHint: {
     fontSize: 14,
+  },
+  gridCardBody: {
+    flex: 1,
+    minHeight: 0,
+    marginTop: 4,
+  },
+  gridCardScroll: {
+    flex: 1,
+    minHeight: 0,
+  },
+  gridCardScrollContent: {
+    paddingBottom: 4,
+    paddingRight: 4,
+    gap: 2,
   },
   todoRow: {
     paddingVertical: 4,
@@ -2244,12 +3094,129 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
   },
+  homeFocusBlock: {
+    gap: 8,
+    paddingTop: 4,
+  },
+  homeFocusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(53, 47, 39, 0.1)",
+  },
+  homeFocusCategory: {
+    color: palette.accent,
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  homeFocusText: {
+    flex: 1,
+    color: palette.ink,
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  assistantScreen: {
+    gap: 16,
+  },
+  assistantIntro: {
+    gap: 4,
+  },
+  assistantIntroText: {
+    color: palette.inkMuted,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  assistantQuickRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  assistantQuickChip: {
+    borderWidth: 1,
+    borderColor: palette.border,
+    borderRadius: 16,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: "rgba(245, 241, 233, 0.45)",
+  },
+  assistantQuickChipText: {
+    color: palette.inkMuted,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  assistantFeed: {
+    gap: 14,
+    paddingTop: 4,
+  },
+  assistantMessageRow: {
+    gap: 4,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(53, 47, 39, 0.08)",
+  },
+  assistantMessageRowUser: {
+    alignItems: "flex-end",
+  },
+  assistantTaskList: {
+    gap: 8,
+  },
+  assistantTaskListLabel: {
+    color: palette.accent,
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+  },
+  assistantTaskRow: {
+    paddingVertical: 4,
+  },
+  assistantTaskBody: {
+    gap: 4,
+  },
+  assistantTaskTitle: {
+    color: palette.ink,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "800",
+  },
+  assistantTaskMeta: {
+    color: palette.inkSoft,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  assistantMessageLabel: {
+    color: palette.inkSoft,
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.4,
+  },
+  assistantMessageText: {
+    color: palette.ink,
+    fontSize: 16,
+    lineHeight: 23,
+  },
+  assistantMessageTextUser: {
+    color: palette.accent,
+    textAlign: "right",
+  },
+  assistantMessageTextPlan: {
+    lineHeight: 24,
+  },
   listScreen: {
     position: "relative",
-    gap: 14,
+    gap: 18,
   },
   listBlankSaver: {
     ...StyleSheet.absoluteFillObject,
+  },
+  historyHeader: {
+    gap: 4,
+  },
+  historyHeaderText: {
+    color: palette.inkMuted,
+    fontSize: 14,
+    lineHeight: 20,
   },
   captureCard: {
     borderRadius: 28,
@@ -2286,8 +3253,28 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "700",
   },
+  captureSection: {
+    gap: 10,
+    paddingBottom: 18,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(53, 47, 39, 0.12)",
+  },
+  captureMetaRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+  },
+  captureItems: {
+    gap: 0,
+  },
+  captureEmptyText: {
+    color: palette.inkSoft,
+    fontSize: 13,
+    lineHeight: 19,
+  },
   listItemCard: {
-    paddingVertical: 14,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: "rgba(53, 47, 39, 0.12)",
   },
@@ -2301,7 +3288,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "flex-start",
     alignItems: "flex-start",
-    gap: 12,
+    gap: 8,
   },
   listItemStatusMark: {
     width: 18,
@@ -2315,25 +3302,23 @@ const styles = StyleSheet.create({
   },
   listItemTextWrap: {
     flex: 1,
-    gap: 4,
+    gap: 2,
   },
   listItemTitleRow: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: 6,
-    flexWrap: "wrap",
     position: "relative",
   },
-  categoryChipButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 2,
-    paddingVertical: 2,
-    paddingRight: 4,
+  listCategoryButton: {
+    paddingVertical: 0,
+    paddingRight: 0,
   },
-  categoryChipButtonText: {
-    fontSize: 12,
-    fontWeight: "800",
+  listCategoryText: {
+    color: palette.inkMuted,
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: "600",
   },
   categoryDropdownMenu: {
     position: "absolute",
@@ -2363,18 +3348,25 @@ const styles = StyleSheet.create({
   },
   listItemTitle: {
     color: palette.ink,
-    fontSize: 18,
-    lineHeight: 24,
-    fontWeight: "700",
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: "600",
   },
   listInlineInput: {
-    minHeight: 24,
+    flex: 1,
+    minHeight: 17,
     paddingVertical: 0,
     paddingHorizontal: 0,
     color: palette.ink,
-    fontSize: 18,
-    lineHeight: 24,
-    fontWeight: "700",
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: "600",
+  },
+  listItemOriginalText: {
+    color: palette.inkMuted,
+    fontSize: 10,
+    lineHeight: 14,
   },
   listItemMeta: {
     color: palette.inkSoft,
@@ -2389,15 +3381,15 @@ const styles = StyleSheet.create({
   },
   listActions: {
     flexDirection: "row",
-    gap: 4,
+    gap: 2,
     justifyContent: "flex-end",
     alignSelf: "flex-start",
     marginRight: -2,
-    paddingTop: 1,
+    paddingTop: 0,
   },
   iconActionButton: {
-    minWidth: 28,
-    height: 28,
+    minWidth: 22,
+    height: 22,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 2,
@@ -2518,6 +3510,32 @@ const styles = StyleSheet.create({
     left: 0,
     zIndex: 11,
   },
+  manualComposerOptions: {
+    gap: 8,
+  },
+  manualComposerRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  manualComposerChip: {
+    minHeight: 32,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: "rgba(245, 241, 233, 0.6)",
+  },
+  manualComposerChipActive: {
+    backgroundColor: "rgba(196, 74, 0, 0.12)",
+    borderColor: "rgba(196, 74, 0, 0.24)",
+  },
+  manualComposerChipText: {
+    color: palette.inkMuted,
+    fontSize: 13,
+    fontWeight: "700",
+  },
   voiceComposerInput: {
     flex: 1,
     minHeight: 42,
@@ -2532,30 +3550,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 22,
     fontWeight: "600",
-  },
-  voiceComposerTopRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "flex-start",
-    gap: 6,
-  },
-  voiceMetaChip: {
-    height: 32,
-    borderRadius: 16,
-    paddingHorizontal: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: "rgba(245, 241, 233, 0.5)",
-  },
-  voiceMetaChipActive: {
-    backgroundColor: "rgba(196, 74, 0, 0.12)",
-  },
-  voiceMetaChipText: {
-    color: palette.accent,
-    fontSize: 13,
-    fontWeight: "700",
   },
   calendarPanel: {
     borderRadius: 20,
@@ -2640,52 +3634,6 @@ const styles = StyleSheet.create({
   voiceStatusTextError: {
     color: "#8C4325",
   },
-  voiceListPicker: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    minWidth: 62,
-    borderRadius: 16,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    backgroundColor: "rgba(245, 241, 233, 0.65)",
-    borderWidth: 1,
-    borderColor: palette.border,
-  },
-  voiceListPickerActive: {
-    backgroundColor: "rgba(196, 74, 0, 0.12)",
-  },
-  voiceListPickerText: {
-    color: palette.inkMuted,
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  voiceCategoryMenu: {
-    marginTop: 8,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: "rgba(245, 241, 233, 0.75)",
-    overflow: "hidden",
-  },
-  voiceCategoryOption: {
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: "rgba(53, 47, 39, 0.08)",
-    backgroundColor: "rgba(245, 241, 233, 0.45)",
-  },
-  voiceCategoryOptionActive: {
-    backgroundColor: "rgba(196, 74, 0, 0.15)",
-  },
-  voiceCategoryOptionText: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: palette.inkMuted,
-  },
-  voiceCategoryOptionTextList: {
-    color: palette.inkMuted,
-  },
   voiceInputRow: {
     flexDirection: "row",
     alignItems: "flex-end",
@@ -2754,14 +3702,20 @@ const styles = StyleSheet.create({
   topNav: {
     marginHorizontal: 18,
     marginTop: 10,
+  },
+  topNavTabs: {
+    width: "100%",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "flex-start",
     paddingHorizontal: 2,
     paddingVertical: 2,
-    flexDirection: "row",
-    justifyContent: "space-between",
+    marginHorizontal: -4,
   },
   navItem: {
-    flex: 1,
+    width: "33.3333%",
     alignItems: "center",
+    paddingHorizontal: 4,
     paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: "transparent",
@@ -2791,54 +3745,52 @@ const styles = StyleSheet.create({
   },
   todayRow: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
     justifyContent: "space-between",
     gap: 12,
-    paddingVertical: 14,
+    paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: "rgba(53, 47, 39, 0.12)",
   },
   todayRowMain: {
     flex: 1,
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
     gap: 12,
   },
   todayRowMarker: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
     borderWidth: 1.5,
     borderColor: palette.accent,
-    marginTop: 2,
   },
   todayRowTitle: {
     color: palette.ink,
     flex: 1,
-    fontSize: 18,
-    lineHeight: 24,
-    fontWeight: "700",
+    fontSize: 16,
+    lineHeight: 22,
+    fontWeight: "600",
   },
   todayEditInput: {
     flex: 1,
-    minHeight: 24,
+    minHeight: 22,
     paddingHorizontal: 0,
     paddingVertical: 0,
     backgroundColor: "transparent",
     color: palette.ink,
     borderWidth: 0,
-    fontSize: 18,
-    lineHeight: 24,
+    fontSize: 16,
+    lineHeight: 22,
   },
   todayRowActions: {
     flexDirection: "row",
     justifyContent: "flex-end",
-    gap: 4,
-    paddingTop: 1,
+    gap: 6,
   },
   todayActionButton: {
-    minWidth: 28,
-    height: 28,
+    minWidth: 24,
+    height: 24,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -2864,5 +3816,186 @@ const styles = StyleSheet.create({
     color: palette.inkMuted,
     fontSize: 16,
     lineHeight: 22,
+  },
+  calendarScreen: {
+    gap: 18,
+  },
+  planCalendarWrap: {
+    alignSelf: "center",
+    width: "100%",
+    maxWidth: 340,
+    gap: 10,
+  },
+  planCalendarHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 4,
+  },
+  planCalendarNavButton: {
+    width: 28,
+    height: 28,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  planCalendarHeaderText: {
+    color: palette.ink,
+    fontSize: 16,
+    fontWeight: "800",
+    letterSpacing: 0.2,
+  },
+  planCalendarWeekRow: {
+    flexDirection: "row",
+    paddingHorizontal: 2,
+  },
+  planCalendarWeekLabel: {
+    width: "14.2857%",
+    textAlign: "center",
+    color: palette.inkSoft,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  planCalendarGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    rowGap: 4,
+  },
+  planCalendarDayPlaceholder: {
+    width: "14.2857%",
+    height: 46,
+  },
+  planCalendarDayButton: {
+    width: "14.2857%",
+    height: 46,
+    alignItems: "center",
+    justifyContent: "flex-start",
+    paddingTop: 5,
+    borderRadius: 14,
+  },
+  planCalendarDayButtonActive: {
+    backgroundColor: palette.accent,
+  },
+  planCalendarDayText: {
+    color: palette.inkMuted,
+    fontSize: 14,
+    fontWeight: "700",
+    lineHeight: 18,
+  },
+  planCalendarDayTextToday: {
+    color: palette.accent,
+  },
+  planCalendarDayTextActive: {
+    color: "#F3E7D8",
+  },
+  planCalendarDayMarkerSlot: {
+    minHeight: 12,
+    marginTop: 5,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  planAgendaSection: {
+    gap: 10,
+  },
+  planAgendaHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  planAgendaHeaderText: {
+    color: palette.ink,
+    fontSize: 18,
+    fontWeight: "800",
+    letterSpacing: 0.3,
+  },
+  planAgendaAddButton: {
+    width: 28,
+    height: 28,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  planQuickAddRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingBottom: 4,
+  },
+  planQuickAddInput: {
+    flex: 1,
+    minHeight: 22,
+    paddingHorizontal: 0,
+    paddingVertical: 0,
+    color: palette.ink,
+    fontSize: 16,
+    lineHeight: 22,
+    fontWeight: "600",
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(53, 47, 39, 0.16)",
+  },
+  planQuickAddSubmitButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(245, 241, 233, 0.78)",
+  },
+  planQuickAddSubmitButtonActive: {
+    backgroundColor: palette.accent,
+  },
+  planAgendaList: {
+    gap: 0,
+  },
+  planAgendaRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(53, 47, 39, 0.1)",
+  },
+  planAgendaRowMarker: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginTop: 7,
+  },
+  planAgendaRowBody: {
+    flex: 1,
+  },
+  planAgendaTitle: {
+    color: palette.ink,
+    fontSize: 16,
+    lineHeight: 22,
+    fontWeight: "600",
+  },
+  planAgendaEmptyText: {
+    color: palette.inkSoft,
+    fontSize: 14,
+    lineHeight: 20,
+    paddingVertical: 6,
+  },
+  calendarPreviewList: {
+    gap: 0,
+  },
+  calendarPreviewRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(53, 47, 39, 0.1)",
+  },
+  calendarPreviewDate: {
+    width: 48,
+    color: palette.accent,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  calendarPreviewText: {
+    flex: 1,
+    color: palette.ink,
+    fontSize: 16,
+    fontWeight: "600",
   },
 });

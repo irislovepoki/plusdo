@@ -13,7 +13,12 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.iris.plusdo"
+      "bundleIdentifier": "com.iris.plusdo",
+      "infoPlist": {
+        "NSSpeechRecognitionUsageDescription": "允许 PlusDo 使用系统语音识别，把你的语音直接转成文字。",
+        "NSMicrophoneUsageDescription": "允许 PlusDo 使用麦克风，把你的语音直接转成待办。"
+      },
+      "appleTeamId": "U9N9YK24BN"
     },
     "android": {
       "package": "com.iris.plusdo",
@@ -23,7 +28,10 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
